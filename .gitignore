@@ -37,19 +37,19 @@ ENV/
 *~
 .DS_Store
 
-# Sensitive files
+# Sensitive files (API keys, tokens, user-specific data)
 *.txt
 !requirements.txt
 !README.txt
 .env
 .env.local
-config.json
-metadata.json
 allowed_ids.txt
 api_key.txt
 bot_key.txt
 key.txt
-prompt.md
+
+# Note: config.json, metadata.json, and prompt.md are essential project files and should be in git
+# They contain default configuration, not sensitive data
 
 # Logs and temporary files
 logs.txt
