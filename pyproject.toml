@@ -12,10 +12,6 @@ license = {text = "MIT"}
 authors = [
     {name = "Misha S.", email = "862andfurther@gmai.com"}
 ]
-Homepage = "https://github.com/kakoyvostorg/trns"
-Documentation = "https://github.com/kakoyvostorg/trns/tree/main/docs"
-Repository = "https://github.com/kakoyvostorg/trns"
-
 keywords = ["transcription", "whisper", "youtube", "telegram", "translation", "language-model"]
 classifiers = [
     "Development Status :: 4 - Beta",
@@ -55,6 +51,12 @@ dev = [
 
 [project.scripts]
 trns = "trns.cli.main:main"
+
+[project.urls]
+Homepage = "https://github.com/kakoyvostorg/trns"
+Documentation = "https://github.com/kakoyvostorg/trns/tree/main/docs"
+Repository = "https://github.com/kakoyvostorg/trns"
+Issues = "https://github.com/kakoyvostorg/trns/issues"
 
 [tool.setuptools]
 packages = ["trns", "trns.bot", "trns.transcription", "trns.cli"]
