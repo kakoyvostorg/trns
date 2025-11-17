@@ -4,6 +4,14 @@ on:
   release:
     types: [published]
   workflow_dispatch:  # Allows manual triggering
+    inputs:
+      publish_to:
+        description: 'Where to publish'
+        required: true
+        type: choice
+        options:
+          - testpypi
+          - pypi
 
 jobs:
   publish:
@@ -30,13 +38,20 @@ jobs:
         run: twine check dist/*
       
       - name: Publish to TestPyPI
-        if: github.event_name == 'workflow_dispatch'
+        if: github.event_name == 'workflow_dispatch' && github.event.inputs.publish_to == 'testpypi'
         env:
           TWINE_USERNAME: __token__
           TWINE_PASSWORD: ${{ secrets.TESTPYPI_API_TOKEN }}
         run: twine upload --repository testpypi dist/*
       
-      - name: Publish to PyPI
+      - name: Publish to PyPI (manual)
+        if: github.event_name == 'workflow_dispatch' && github.event.inputs.publish_to == 'pypi'
+        env:
+          TWINE_USERNAME: __token__
+          TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
+        run: twine upload dist/*
+      
+      - name: Publish to PyPI (release)
         if: github.event_name == 'release'
         env:
           TWINE_USERNAME: __token__
