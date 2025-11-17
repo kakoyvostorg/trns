@@ -42,6 +42,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Graceful shutdown handling
 - Import path issues
 
+## [0.1.1] - 2025-11-17
+
+### Fixed
+- Fixed package build configuration (package-dir, license format)
+- Fixed PyPI publishing workflow to support manual publishing
+- Removed deprecated license classifier
+
 ## [Unreleased]
 
 ### Planned

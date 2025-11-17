@@ -5,5 +5,5 @@ A tool for transcribing YouTube videos, Twitter/X.com videos, and local video fi
 with automatic translation and language model processing.
 """
 
-__version__ = "0.1.0"
+__version__ = "0.1.1"
 
