@@ -1,0 +1,40 @@
+# YouTube Live Stream Transcription Requirements
+
+# For subtitle extraction
+youtube-transcript-api>=0.6.0
+
+# For audio extraction from YouTube
+yt-dlp>=2023.10.7
+
+# For speech-to-text transcription (choose one or both)
+# Option 1: faster-whisper (recommended - faster and more efficient)
+faster-whisper>=0.9.0
+
+# Option 2: openai-whisper (alternative, slower but more widely used)
+# openai-whisper>=20231117
+
+# For Russian speech recognition (optional, but recommended for Russian audio)
+# Hugging Face Hub for loading fine-tuned Russian Whisper model
+
+# For translation
+deep-translator>=1.11.4
+
+# For language model processing (OpenRouter.ai via OpenAI client)
+openai>=1.0.0
+
+# For progress bars
+tqdm>=4.66.0
+
+# For Telegram bot functionality
+python-telegram-bot>=20.0
+
+# For FastAPI webhook server
+fastapi>=0.104.0
+uvicorn[standard]>=0.24.0
+
+# Note: FFmpeg is required for audio processing
+# Install FFmpeg separately:
+# - macOS: brew install ffmpeg
+# - Linux: sudo apt-get install ffmpeg (or equivalent)
+# - Windows: Download from https://ffmpeg.org/download.html
+
