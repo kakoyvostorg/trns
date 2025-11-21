@@ -1157,6 +1157,18 @@ async def handle_video_message(update: Update, context: ContextTypes.DEFAULT_TYP
         await update.message.reply_text(get_text(metadata, "no_video_file"))
         return
     
+    # Check file size before attempting download
+    # Telegram Bot API limit is 20MB for get_file, but videos can be larger
+    MAX_DOWNLOADABLE_SIZE = 20 * 1024 * 1024  # 20MB in bytes
+    file_size = getattr(video, 'file_size', None)
+    if file_size and file_size > MAX_DOWNLOADABLE_SIZE:
+        await update.message.reply_text(
+            f"❌ File is too large ({file_size / (1024*1024):.1f} MB). "
+            f"Maximum size is {MAX_DOWNLOADABLE_SIZE / (1024*1024):.0f} MB. "
+            f"Please use a smaller file or provide a YouTube/Twitter link instead."
+        )
+        return
+    
     # Check token warning
     if check_token_warning():
         warning_text = get_text(metadata, "token_warning")
@@ -1195,7 +1207,22 @@ async def handle_video_message(update: Update, context: ContextTypes.DEFAULT_TYP
     except Exception as e:
         logger.exception(f"Error handling video: {e}")
         error_text = get_text(metadata, "error_occurred")
-        await update.message.reply_text(f"{error_text} {str(e)}", reply_markup=keyboard)
+        
+        # Provide user-friendly error messages
+        error_message = str(e)
+        if "File is too big" in error_message or "too big" in error_message.lower():
+            user_message = (
+                f"❌ File is too large to download. "
+                f"Telegram Bot API limit is 20MB. "
+                f"Please use a smaller file or provide a YouTube/Twitter link instead."
+            )
+        else:
+            user_message = f"{error_text} {error_message}"
+        
+        try:
+            await update.message.reply_text(user_message, reply_markup=keyboard)
+        except Exception as e2:
+            logger.error(f"Error sending error message: {e2}")
         set_user_state(user_id, None)
 
 

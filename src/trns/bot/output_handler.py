@@ -85,16 +85,22 @@ class TelegramOutputHandler:
         pass
 
 
-async def send_text_to_telegram(bot, chat_id: int, text: str) -> None:
+async def send_text_to_telegram(client, chat_id: int, text: str, max_retries: int = 3) -> None:
     """
     Send text to Telegram, splitting into chunks if needed.
     
     Args:
-        bot: Telegram bot instance
+        client: Pyrogram client instance
         chat_id: Chat ID to send message to
         text: Text to send
+        max_retries: Maximum number of retry attempts for each chunk
     """
     if not text or not text.strip():
+        return
+    
+    # Validate client instance
+    if client is None:
+        logger.error(f"Cannot send message: client instance is None for chat_id={chat_id}")
         return
     
     # Split into chunks if too long (Telegram limit is 4096 chars)
@@ -118,16 +124,38 @@ async def send_text_to_telegram(bot, chat_id: int, text: str) -> None:
     if not chunks:
         return
     
-    # Send all chunks
+    # Send all chunks with retry logic
     for i, chunk in enumerate(chunks):
         if not chunk or not chunk.strip():
             continue
         
-        try:
-            await bot.send_message(chat_id=chat_id, text=chunk)
-            logger.debug(f"Sent chunk {i+1}/{len(chunks)} to chat_id={chat_id}")
-        except Exception as e:
-            logger.error(f"Error sending message chunk {i+1}/{len(chunks)} to Telegram: {e}", exc_info=True)
-            # Continue with other chunks even if one fails
-            raise
+        # Retry logic for each chunk
+        last_exception = None
+        for attempt in range(max_retries):
+            try:
+                # Increase timeout to 30s for long messages (default is 10s)
+                await asyncio.wait_for(
+                    client.send_message(chat_id=chat_id, text=chunk),
+                    timeout=30.0
+                )
+                logger.debug(f"Sent chunk {i+1}/{len(chunks)} to chat_id={chat_id}")
+                break  # Success, move to next chunk
+            except Exception as e:
+                last_exception = e
+                if attempt < max_retries - 1:
+                    # Wait before retry (exponential backoff)
+                    wait_time = 0.5 * (2 ** attempt)
+                    logger.warning(
+                        f"Error sending chunk {i+1}/{len(chunks)} (attempt {attempt + 1}/{max_retries}): {e}. "
+                        f"Retrying in {wait_time}s..."
+                    )
+                    await asyncio.sleep(wait_time)
+                else:
+                    # Final attempt failed
+                    logger.error(
+                        f"Failed to send chunk {i+1}/{len(chunks)} after {max_retries} attempts: {e}",
+                        exc_info=True
+                    )
+                    # Continue with other chunks even if one fails
+                    # Don't raise - we want to try sending remaining chunks
 

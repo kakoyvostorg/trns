@@ -44,7 +44,7 @@ Yandex Serverless Containers is ideal for webhook-based bots as it provides:
 3. **Create Serverless Container:**
    ```bash
    yc serverless container create --name trns-bot \
-     --memory 2GB \
+     --memory 4GB \
      --cores 2 \
      --execution-timeout 300s \
      --concurrency 10 \
@@ -56,9 +56,11 @@ Yandex Serverless Containers is ideal for webhook-based bots as it provides:
    yc serverless container revision deploy \
      --container-name trns-bot \
      --image cr.yandex/${REGISTRY_ID}/trns:latest \
-     --environment BOT_TOKEN=your_token,AUTH_KEY=your_key,OPENROUTER_API_KEY=your_key,ALLOWED_USER_IDS=123456789 \
+     --environment BOT_TOKEN=your_token,TELEGRAM_API_ID=your_api_id,TELEGRAM_API_HASH=your_api_hash,AUTH_KEY=your_key,OPENROUTER_API_KEY=your_key \
      --service-account-id YOUR_SERVICE_ACCOUNT_ID
    ```
+   
+   **Note:** You must obtain `TELEGRAM_API_ID` and `TELEGRAM_API_HASH` from https://my.telegram.org before deployment. Users authenticate with `AUTH_KEY` and are automatically added to `config.json`.
 
 5. **Get Container URL:**
    ```bash
@@ -96,6 +98,8 @@ For production, use Yandex Lockbox to store secrets:
      --container-name trns-bot \
      --image cr.yandex/${REGISTRY_ID}/trns:latest \
      --secret environment-variable,BOT_TOKEN,trns-secrets,BOT_TOKEN \
+     --secret environment-variable,TELEGRAM_API_ID,trns-secrets,TELEGRAM_API_ID \
+     --secret environment-variable,TELEGRAM_API_HASH,trns-secrets,TELEGRAM_API_HASH \
      --secret environment-variable,OPENROUTER_API_KEY,trns-secrets,OPENROUTER_API_KEY
    ```
 
@@ -305,9 +309,10 @@ Use Yandex Application Load Balancer for multiple VMs or scale manually.
 
 ### High memory usage
 
-- Increase container memory: `--memory 4GB`
+- Increase container memory: `--memory 8GB` (if processing very large files)
 - Optimize transcription settings in config
 - Consider processing videos in smaller chunks
+- Note: 4GB is recommended for files up to 2GB
 
 ## Cost Optimization
 

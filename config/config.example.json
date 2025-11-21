@@ -8,7 +8,7 @@
   "translation_output": "russian-only",
   "save_transcript": null,
   "overlap": 2,
-  "process_mode": "chunked",
+  "process_mode": "full",
   "lm_window_seconds": 120,
   "lm_interval": 30,
   "lm_output_mode": "both",
@@ -16,5 +16,6 @@
   "lm_prompt_file": "prompt.md",
   "lm_model": "google/gemma-3-27b-it:free",
   "debug": false,
-  "context": ""
+  "context": "",
+  "allowed_user_ids": []
 }

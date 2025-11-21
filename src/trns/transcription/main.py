@@ -50,9 +50,8 @@ def signal_handler(sig, frame):
     shutdown_flag = True
 
 
-# Register signal handler
-signal.signal(signal.SIGINT, signal_handler)
-signal.signal(signal.SIGTERM, signal_handler)
+# Note: Signal handlers are registered in main() to avoid conflicts when imported as a library
+# (e.g., by the bot server which uses uvicorn with its own signal handlers)
 
 
 def get_shutdown_flag():
@@ -165,6 +164,10 @@ def apply_config_to_args(args, config):
 def main():
     """Main function to run the transcription script"""
     global shutdown_flag
+    
+    # Register signal handlers (only when running as main script, not when imported)
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
     
     parser = argparse.ArgumentParser(
         description="Extract text from YouTube live stream in real time",

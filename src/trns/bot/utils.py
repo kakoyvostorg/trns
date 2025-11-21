@@ -86,41 +86,118 @@ def load_auth_key(key_path: str = "key.txt") -> str:
         raise
 
 
-def is_user_authenticated(user_id: int, allowed_ids_path: str = "allowed_ids.txt") -> bool:
-    """Check if user ID is in allowed list (from environment or file)"""
-    # Try environment variable first
-    allowed_ids_env = os.getenv("ALLOWED_USER_IDS")
-    if allowed_ids_env:
+def is_user_authenticated(user_id: int, config_path: str = None) -> bool:
+    """Check if user ID is in allowed list (from config.json)"""
+    if config_path is None:
+        config_path = os.getenv("CONFIG_PATH", "config.json")
+    
+    try:
+        config = load_config(config_path)
+        allowed_ids = config.get("allowed_user_ids", [])
+        return user_id in allowed_ids
+    except Exception as e:
+        logger.error(f"Error checking authentication: {e}")
+        return False
+
+
+def add_authenticated_user(user_id: int, config_path: str = None):
+    """
+    Add user ID to allowed list in config.json with file locking to prevent race conditions.
+    
+    This function uses file locking to ensure atomic read-modify-write operations,
+    preventing data loss when multiple users authenticate concurrently.
+    """
+    if config_path is None:
+        config_path = os.getenv("CONFIG_PATH", "config.json")
+    
+    import tempfile
+    
+    # Import platform-specific locking
+    try:
+        import fcntl
+        has_fcntl = True
+    except ImportError:
+        # Windows doesn't have fcntl
+        has_fcntl = False
+    
+    # Use a lock file to ensure atomic operations
+    lock_path = config_path + ".lock"
+    
+    try:
+        # Create lock file if it doesn't exist
+        lock_file = open(lock_path, 'w')
+        
         try:
-            allowed_ids = [int(uid.strip()) for uid in allowed_ids_env.split(',') if uid.strip()]
-            return user_id in allowed_ids
-        except ValueError:
-            logger.warning("Invalid ALLOWED_USER_IDS format, falling back to file")
-    
-    # Fallback to file
-    if not os.path.exists(allowed_ids_path):
-        return False
-    
-    try:
-        with open(allowed_ids_path, 'r', encoding='utf-8') as f:
-            allowed_ids = [int(line.strip()) for line in f if line.strip()]
-            return user_id in allowed_ids
-    except (ValueError, FileNotFoundError):
-        return False
-
-
-def add_authenticated_user(user_id: int, allowed_ids_path: str = "allowed_ids.txt"):
-    """Add user ID to allowed list"""
-    # Check if already added
-    if is_user_authenticated(user_id, allowed_ids_path):
-        return
-    
-    try:
-        with open(allowed_ids_path, 'a', encoding='utf-8') as f:
-            f.write(f"{user_id}\n")
+            # Acquire exclusive lock (blocks until available)
+            if has_fcntl:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+                logger.debug(f"Acquired lock for config file (fcntl)")
+            else:
+                # Windows: use file existence as lock (not perfect but better than nothing)
+                import time
+                retry_count = 0
+                while os.path.exists(lock_path + ".active") and retry_count < 50:
+                    time.sleep(0.1)
+                    retry_count += 1
+                open(lock_path + ".active", 'w').close()
+                logger.debug(f"Acquired lock for config file (file-based)")
+            
+            # Now safely read, modify, and write
+            config = load_config(config_path)
+            
+            # Check if already added (inside lock to ensure accuracy)
+            if "allowed_user_ids" not in config:
+                config["allowed_user_ids"] = []
+            
+            if user_id in config["allowed_user_ids"]:
+                logger.info(f"User {user_id} is already authenticated")
+                return
+            
+            # Add user ID
+            config["allowed_user_ids"].append(user_id)
+            
+            # Atomic write: write to temp file, then rename
+            temp_fd, temp_path = tempfile.mkstemp(
+                dir=os.path.dirname(config_path),
+                prefix=".config_",
+                suffix=".tmp"
+            )
+            
+            try:
+                with os.fdopen(temp_fd, 'w', encoding='utf-8') as f:
+                    json.dump(config, f, indent=2, ensure_ascii=False)
+                
+                # Atomic rename (replaces old file)
+                os.replace(temp_path, config_path)
+                logger.info(f"Added user {user_id} to allowed list in config.json")
+                
+            except Exception as e:
+                # Clean up temp file on error
+                if os.path.exists(temp_path):
+                    os.remove(temp_path)
+                raise
+            
+        finally:
+            # Always release lock
+            if has_fcntl:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+            else:
+                # Windows: remove active lock file
+                if os.path.exists(lock_path + ".active"):
+                    os.remove(lock_path + ".active")
+            lock_file.close()
+            logger.debug(f"Released lock for config file")
+            
     except Exception as e:
         logger.error(f"Error adding user to allowed list: {e}")
         raise
+    finally:
+        # Clean up lock file if it exists and is empty
+        try:
+            if os.path.exists(lock_path) and os.path.getsize(lock_path) == 0:
+                os.remove(lock_path)
+        except Exception:
+            pass  # Ignore cleanup errors
 
 
 def load_config(config_path: str = None) -> Dict:

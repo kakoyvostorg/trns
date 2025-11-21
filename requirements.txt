@@ -26,11 +26,13 @@ openai>=1.0.0
 tqdm>=4.66.0
 
 # For Telegram bot functionality
-python-telegram-bot>=20.0
+pyrogram>=2.0.0
+tgcrypto>=1.2.0
 
 # For FastAPI webhook server
 fastapi>=0.104.0
 uvicorn[standard]>=0.24.0
+aiohttp>=3.8.0
 
 # Note: FFmpeg is required for audio processing
 # Install FFmpeg separately:

@@ -10,9 +10,10 @@ services:
       - "8000:8000"
     environment:
       - BOT_TOKEN=${BOT_TOKEN}
+      - TELEGRAM_API_ID=${TELEGRAM_API_ID}
+      - TELEGRAM_API_HASH=${TELEGRAM_API_HASH}
       - AUTH_KEY=${AUTH_KEY}
       - OPENROUTER_API_KEY=${OPENROUTER_API_KEY}
-      - ALLOWED_USER_IDS=${ALLOWED_USER_IDS}
       - HOST=0.0.0.0
       - PORT=8000
     volumes:

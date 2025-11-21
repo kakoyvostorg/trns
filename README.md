@@ -38,10 +38,13 @@ trns /path/to/video.mp4
 2. Set environment variables or create config files:
    ```bash
    export BOT_TOKEN=your_bot_token
+   export TELEGRAM_API_ID=your_api_id
+   export TELEGRAM_API_HASH=your_api_hash
    export AUTH_KEY=your_auth_key
    export OPENROUTER_API_KEY=your_api_key
-   export ALLOWED_USER_IDS=123456789,987654321
    ```
+   
+   **Note:** Get `TELEGRAM_API_ID` and `TELEGRAM_API_HASH` from https://my.telegram.org. Users will authenticate with `AUTH_KEY` and be automatically added to `config.json`.
 3. Run the bot:
    ```bash
    python -m trns.bot.server
@@ -54,14 +57,17 @@ TRNS supports both environment variables and file-based configuration:
 
 ### Environment Variables
 
-- `BOT_TOKEN`: Telegram bot token
-- `AUTH_KEY`: Authentication key for bot access
+- `BOT_TOKEN`: Telegram bot token (from @BotFather)
+- `TELEGRAM_API_ID`: Telegram API ID (from https://my.telegram.org)
+- `TELEGRAM_API_HASH`: Telegram API Hash (from https://my.telegram.org)
+- `AUTH_KEY`: Authentication key for bot access (users authenticate once, then stored in config.json)
 - `OPENROUTER_API_KEY`: OpenRouter.ai API key
-- `ALLOWED_USER_IDS`: Comma-separated list of allowed Telegram user IDs
 - `HOST`: Server host (default: 0.0.0.0)
 - `PORT`: Server port (default: 8000)
 - `CONFIG_PATH`: Path to config.json (default: config.json)
 - `METADATA_PATH`: Path to metadata.json (default: metadata.json)
+
+**Note:** Authenticated user IDs are stored in `config.json` after successful authentication with the AUTH_KEY.
 
 ### File-based Configuration
 
@@ -70,8 +76,9 @@ Create the following files in the project root:
 - `bot_key.txt`: Telegram bot token
 - `key.txt`: Authentication key
 - `api_key.txt`: OpenRouter.ai API key (one per line)
-- `allowed_ids.txt`: Allowed user IDs (one per line)
-- `config.json`: Application configuration
+- `config.json`: Application configuration (copy from `config/config.example.json`)
+
+**Important:** Copy `config/config.example.json` to `config.json` and customize it. The `config.json` file is not tracked in git as it contains sensitive user IDs after authentication.
 - `metadata.json`: Localization and metadata
 
 See `config/` directory for example files.

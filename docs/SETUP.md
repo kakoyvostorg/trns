@@ -74,10 +74,21 @@ Create a `.env` file or set environment variables:
 
 ```bash
 export BOT_TOKEN=your_bot_token_here
+export TELEGRAM_API_ID=your_api_id_here
+export TELEGRAM_API_HASH=your_api_hash_here
 export AUTH_KEY=your_auth_key_here
 export OPENROUTER_API_KEY=your_openrouter_api_key
-export ALLOWED_USER_IDS=123456789,987654321
 ```
+
+**Getting Telegram API Credentials:**
+1. Go to https://my.telegram.org
+2. Log in with your phone number
+3. Click on "API development tools"
+4. Create a new application (if you haven't already)
+5. Copy your `api_id` and `api_hash`
+
+**User Authentication:**
+Users authenticate by sending the `AUTH_KEY` to the bot. After successful authentication, their user ID is automatically stored in `config.json` and they remain authenticated.
 
 #### Method B: File-based Configuration
 
@@ -86,7 +97,6 @@ Create the following files in your project root:
 - `bot_key.txt`: Your Telegram bot token
 - `key.txt`: Authentication key (users will need this to access the bot)
 - `api_key.txt`: OpenRouter.ai API key (one per line if multiple)
-- `allowed_ids.txt`: Allowed user IDs (one per line)
 
 ### 3. Configure Metadata and Config Files
 

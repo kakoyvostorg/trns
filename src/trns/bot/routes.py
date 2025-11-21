@@ -1,7 +1,7 @@
 """
 Telegram Bot Route Handlers
 
-Handles all bot commands and message types for the FastAPI webhook implementation.
+Handles all bot commands and message types for Pyrogram with FastAPI webhook implementation.
 """
 
 import asyncio
@@ -14,14 +14,8 @@ import tempfile
 import threading
 from typing import Optional
 
-from telegram import Update, ReplyKeyboardMarkup
-from telegram.ext import (
-    Application,
-    CommandHandler,
-    MessageHandler,
-    ContextTypes,
-    filters
-)
+from pyrogram import Client
+from pyrogram.types import Message, Update
 
 from trns.bot.utils import (
     load_metadata,
@@ -70,15 +64,27 @@ def set_user_state(user_id: int, state: Optional[str]):
         user_states[user_id] = state
 
 
-async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+def handle_task_error(task: asyncio.Task, user_id: int):
+    """Handle errors from background tasks"""
+    try:
+        task.result()  # This will raise if task had an exception
+    except asyncio.CancelledError:
+        logger.debug(f"Task for user {user_id} was cancelled")
+    except Exception as e:
+        logger.exception(f"Error in background task for user {user_id}: {e}")
+
+
+async def start_command(client: Client, message: Message) -> None:
     """Handle /start command - authentication flow"""
-    user_id = update.effective_user.id
-    metadata = context.bot_data.get("metadata", load_metadata())
-    keyboard = context.bot_data.get("keyboard")
+    from trns.bot.server import bot_metadata, bot_keyboard
+    
+    user_id = message.from_user.id
+    metadata = bot_metadata if bot_metadata else load_metadata()
+    keyboard = bot_keyboard
     
     # Check if already authenticated
     if is_user_authenticated(user_id):
-        await update.message.reply_text(
+        await message.reply_text(
             get_text(metadata, "auth_success"),
             reply_markup=keyboard
         )
@@ -86,14 +92,16 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     
     # Start authentication flow
     set_user_state(user_id, STATE_WAITING_KEY)
-    await update.message.reply_text(get_text(metadata, "start_message"))
+    await message.reply_text(get_text(metadata, "start_message"))
 
 
-async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def cancel_command(client: Client, message: Message) -> None:
     """Handle /cancel command"""
-    user_id = update.effective_user.id
-    metadata = context.bot_data.get("metadata", load_metadata())
-    keyboard = context.bot_data.get("keyboard")
+    from trns.bot.server import bot_metadata, bot_keyboard
+    
+    user_id = message.from_user.id
+    metadata = bot_metadata if bot_metadata else load_metadata()
+    keyboard = bot_keyboard
     
     # Cancel any ongoing processing
     await cancel_user_processing(user_id)
@@ -104,20 +112,22 @@ async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     # Clear user state
     set_user_state(user_id, None)
     
-    await update.message.reply_text(
+    await message.reply_text(
         get_text(metadata, "cancel_success"),
         reply_markup=keyboard
     )
 
 
-async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def stats_command(client: Client, message: Message) -> None:
     """Handle /stats command - show remaining daily capacity"""
-    user_id = update.effective_user.id
-    metadata = context.bot_data.get("metadata", load_metadata())
+    from trns.bot.server import bot_metadata
+    
+    user_id = message.from_user.id
+    metadata = bot_metadata if bot_metadata else load_metadata()
     
     # Check authentication
     if not is_user_authenticated(user_id):
-        await update.message.reply_text(get_text(metadata, "not_authenticated"))
+        await message.reply_text(get_text(metadata, "not_authenticated"))
         return
     
     # Get current capacity
@@ -129,59 +139,64 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     if capacity < 50:
         stats_text += f"\n⚠️ Внимание: осталось менее 50 запросов!"
     
-    await update.message.reply_text(stats_text)
+    await message.reply_text(stats_text)
 
 
 async def cancel_user_processing(user_id: int):
     """Cancel ongoing processing for a user"""
+    # Get task info outside lock to avoid holding lock during async operations
+    task_info = None
     with processing_lock:
         if user_id in user_processing_tasks:
-            task_info = user_processing_tasks[user_id]
-            
-            # Set shutdown flag first to stop pipeline
-            if "shutdown_flag" in task_info:
-                shutdown_flag = task_info["shutdown_flag"]
-                if shutdown_flag:
-                    shutdown_flag.set()
-                    logger.info(f"Shutdown flag set for user {user_id}")
-            
-            # Note: Executor tasks (threads) can't be cancelled directly
-            # We rely on the shutdown_flag to stop the pipeline
-            # The pipeline checks shutdown_flag regularly and will stop when it's set
-            if "executor_task" in task_info:
-                executor_task = task_info["executor_task"]
-                if executor_task and not executor_task.done():
-                    logger.info(f"Shutdown flag set, waiting for executor task to finish for user {user_id}")
-                    # Wait a bit for the pipeline to respond to shutdown flag
-                    try:
-                        await asyncio.wait_for(executor_task, timeout=10.0)
-                    except asyncio.TimeoutError:
-                        logger.warning(f"Executor task didn't finish in time for user {user_id}, continuing anyway")
-                    except Exception as e:
-                        logger.error(f"Error waiting for executor task: {e}")
-            
-            # Cancel async task if it exists
-            if "task" in task_info:
-                task = task_info["task"]
-                if task and not task.done():
-                    logger.info(f"Cancelling async task for user {user_id}")
-                    task.cancel()
-                    try:
-                        await task
-                    except asyncio.CancelledError:
-                        pass
-            
-            # Cancel output task if it exists
-            if "output_task" in task_info:
-                output_task = task_info["output_task"]
-                if output_task and not output_task.done():
-                    logger.info(f"Cancelling output task for user {user_id}")
-                    output_task.cancel()
-                    try:
-                        await output_task
-                    except asyncio.CancelledError:
-                        pass
-            
+            # Make a copy of task info to work with outside the lock
+            task_info = user_processing_tasks[user_id].copy()
+    
+    if not task_info:
+        return
+    
+    # Set shutdown flag first to stop pipeline
+    shutdown_flag = task_info.get("shutdown_flag")
+    if shutdown_flag:
+        shutdown_flag.set()
+        logger.info(f"Shutdown flag set for user {user_id}")
+    
+    # Cancel output task first (it depends on shutdown_flag)
+    output_task = task_info.get("output_task")
+    if output_task and not output_task.done():
+        logger.info(f"Cancelling output task for user {user_id}")
+        output_task.cancel()
+        try:
+            await asyncio.wait_for(output_task, timeout=3.0)
+        except (asyncio.TimeoutError, asyncio.CancelledError):
+            logger.warning(f"Output task cancellation timeout for user {user_id}")
+    
+    # Note: Executor tasks (threads) can't be cancelled directly
+    # We rely on the shutdown_flag to stop the pipeline
+    # The pipeline checks shutdown_flag regularly and will stop when it's set
+    executor_task = task_info.get("executor_task")
+    if executor_task and not executor_task.done():
+        logger.info(f"Waiting for executor task to finish for user {user_id}")
+        # Wait a bit for the pipeline to respond to shutdown flag
+        try:
+            await asyncio.wait_for(executor_task, timeout=10.0)
+        except asyncio.TimeoutError:
+            logger.warning(f"Executor task didn't finish in time for user {user_id}, continuing anyway")
+        except Exception as e:
+            logger.error(f"Error waiting for executor task: {e}")
+    
+    # Cancel async task if it exists (this is the main processing task)
+    task = task_info.get("task")
+    if task and not task.done():
+        logger.info(f"Cancelling async task for user {user_id}")
+        task.cancel()
+        try:
+            await asyncio.wait_for(task, timeout=5.0)
+        except (asyncio.TimeoutError, asyncio.CancelledError):
+            logger.warning(f"Async task cancellation timeout for user {user_id}")
+    
+    # Finally, remove from tasks dict
+    with processing_lock:
+        if user_id in user_processing_tasks:
             del user_processing_tasks[user_id]
             logger.info(f"Cleaned up processing tasks for user {user_id}")
 
@@ -190,6 +205,7 @@ def is_youtube_url(text: str) -> bool:
     """Check if text is a YouTube URL"""
     youtube_patterns = [
         r'(?:https?://)?(?:www\.)?(?:youtube\.com/watch\?v=|youtu\.be/)([a-zA-Z0-9_-]{11})',
+        r'(?:https?://)?(?:www\.)?youtube\.com/live/([a-zA-Z0-9_-]{11})',
         r'(?:https?://)?(?:www\.)?youtube\.com/embed/([a-zA-Z0-9_-]{11})',
     ]
     for pattern in youtube_patterns:
@@ -211,11 +227,26 @@ def is_twitter_url(text: str) -> bool:
     return False
 
 
-async def process_youtube_video(url: str, user_id: int, update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def process_youtube_video(url: str, user_id: int, client: Client, message: Message):
     """Process YouTube video using TranscriptionPipeline with callback handler"""
-    metadata = context.bot_data.get("metadata", load_metadata())
-    bot = context.bot
-    chat_id = update.effective_chat.id
+    from trns.bot.server import bot_metadata
+    
+    metadata = bot_metadata if bot_metadata else load_metadata()
+    chat_id = message.chat.id
+    
+    # Get shutdown flag from task info (created atomically in handler)
+    shutdown_flag = None
+    with processing_lock:
+        if user_id in user_processing_tasks:
+            shutdown_flag = user_processing_tasks[user_id].get("shutdown_flag")
+    
+    if shutdown_flag is None:
+        logger.error(f"Shutdown flag not found for user {user_id}")
+        try:
+            await client.send_message(chat_id=chat_id, text=get_text(metadata, "error_occurred") + " Internal error: missing shutdown flag.")
+        except Exception as e:
+            logger.error(f"Error sending error message: {e}")
+        return
     
     try:
         # Extract video ID
@@ -235,24 +266,21 @@ async def process_youtube_video(url: str, user_id: int, update: Update, context:
         args = apply_config_to_args(args, config)
         args.url = url
         
-        # Create shutdown flag
-        shutdown_flag = threading.Event()
-        
-        # Store shutdown flag for cancellation (will be updated with tasks later)
-        with processing_lock:
-            if user_id not in user_processing_tasks:
-                user_processing_tasks[user_id] = {}
-            user_processing_tasks[user_id]["shutdown_flag"] = shutdown_flag
-            user_processing_tasks[user_id]["type"] = "youtube"
-        
-        # Validate bot instance
-        if bot is None:
-            logger.error(f"Bot instance is None for user_id={user_id}, chat_id={chat_id}")
-            await update.message.reply_text(get_text(metadata, "error_occurred") + " Bot instance is invalid.")
+        # Validate client instance
+        if client is None:
+            logger.error(f"Client instance is None for user_id={user_id}, chat_id={chat_id}")
+            try:
+                await message.reply_text(get_text(metadata, "error_occurred") + " Client instance is invalid.")
+            except Exception as e:
+                logger.error(f"Error sending error message: {e}")
             return
         
         # Send processing started message
-        await bot.send_message(chat_id=chat_id, text=get_text(metadata, "processing_started"))
+        try:
+            await client.send_message(chat_id=chat_id, text=get_text(metadata, "processing_started"))
+        except Exception as e:
+            logger.error(f"Error sending processing started message: {e}")
+            # Continue anyway
         
         # Use a queue to send output in real-time
         # This avoids interfering with subprocess calls (yt-dlp/ffmpeg)
@@ -322,7 +350,7 @@ async def process_youtube_video(url: str, user_id: int, update: Update, context:
                         if shutdown_flag.is_set():
                             # Send any remaining buffer
                             if buffer.strip():
-                                await send_text_to_telegram(bot, chat_id, buffer)
+                                await send_text_to_telegram(client, chat_id, buffer)
                             break
                         continue
                     
@@ -330,7 +358,7 @@ async def process_youtube_video(url: str, user_id: int, update: Update, context:
                     if text is None:
                         # Send any remaining buffer
                         if buffer.strip():
-                            await send_text_to_telegram(bot, chat_id, buffer)
+                            await send_text_to_telegram(client, chat_id, buffer)
                         break
                     
                     # Add to buffer
@@ -348,7 +376,7 @@ async def process_youtube_video(url: str, user_id: int, update: Update, context:
                     )
                     
                     if should_send and buffer.strip():
-                        await send_text_to_telegram(bot, chat_id, buffer)
+                        await send_text_to_telegram(client, chat_id, buffer)
                         buffer = ""
                         last_send_time = current_time
                     
@@ -367,7 +395,7 @@ async def process_youtube_video(url: str, user_id: int, update: Update, context:
             # Store executor future so it can be cancelled
             executor_task = loop.run_in_executor(None, run_pipeline)
             
-            # Update task info with executor task
+            # Update task info with executor task atomically
             with processing_lock:
                 if user_id in user_processing_tasks:
                     user_processing_tasks[user_id]["executor_task"] = executor_task
@@ -380,66 +408,84 @@ async def process_youtube_video(url: str, user_id: int, update: Update, context:
             # Cancel the executor task if possible
             if executor_task and not executor_task.done():
                 executor_task.cancel()
-        except Exception as e:
-            logger.exception(f"Error in pipeline execution: {e}")
-            await bot.send_message(chat_id=chat_id, text=f"{get_text(metadata, 'error_occurred')} {str(e)}")
-        finally:
-            # Wait for output task to finish (with timeout)
-            try:
-                await asyncio.wait_for(output_task, timeout=5.0)
-            except asyncio.TimeoutError:
-                logger.warning("Timeout waiting for output task")
-                output_task.cancel()
                 try:
-                    await output_task
+                    await executor_task
                 except asyncio.CancelledError:
                     pass
+        except Exception as e:
+            logger.exception(f"Error in pipeline execution: {e}")
+            try:
+                await client.send_message(chat_id=chat_id, text=f"{get_text(metadata, 'error_occurred')} {str(e)}")
+            except Exception as e2:
+                logger.error(f"Error sending error message: {e2}")
+        finally:
+            # Always wait for output task to finish (with timeout - increased to 30s for LM processing)
+            try:
+                await asyncio.wait_for(output_task, timeout=30.0)
+            except asyncio.TimeoutError:
+                logger.warning("Timeout waiting for output task, cancelling")
+                output_task.cancel()
+                try:
+                    await asyncio.wait_for(output_task, timeout=5.0)
+                except (asyncio.TimeoutError, asyncio.CancelledError):
+                    pass
+            except asyncio.CancelledError:
+                pass
         
         # Only send completion message if not cancelled
         if not shutdown_flag.is_set():
             try:
-                await bot.send_message(chat_id=chat_id, text=get_text(metadata, "processing_complete"))
+                await client.send_message(chat_id=chat_id, text=get_text(metadata, "processing_complete"))
             except Exception as e:
                 logger.debug(f"Error sending completion message: {e}")
         
         # Reset context after processing
         reset_context()
         
-        # Clear processing state
-        with processing_lock:
-            if user_id in user_processing_tasks:
-                del user_processing_tasks[user_id]
-        
     except asyncio.CancelledError:
         logger.info(f"Processing cancelled for user {user_id}")
         try:
-            await bot.send_message(chat_id=chat_id, text=get_text(metadata, "cancel_success"))
+            await client.send_message(chat_id=chat_id, text=get_text(metadata, "cancel_success"))
         except Exception as e:
             logger.debug(f"Error sending cancel message: {e}")
         # Reset context on cancel
         reset_context()
-        with processing_lock:
-            if user_id in user_processing_tasks:
-                del user_processing_tasks[user_id]
     except Exception as e:
         logger.exception(f"Error processing YouTube video: {e}")
         error_text = get_text(metadata, "error_occurred")
         try:
-            await bot.send_message(chat_id=chat_id, text=f"{error_text} {str(e)}")
+            await client.send_message(chat_id=chat_id, text=f"{error_text} {str(e)}")
         except Exception as e2:
-            logger.debug(f"Error sending error message: {e2}")
+            logger.error(f"Error sending error message: {e2}")
         # Reset context on error
         reset_context()
+    finally:
+        # Always clear processing state in finally block
         with processing_lock:
             if user_id in user_processing_tasks:
                 del user_processing_tasks[user_id]
 
 
-async def process_twitter_video(url: str, user_id: int, update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def process_twitter_video(url: str, user_id: int, client: Client, message: Message):
     """Process Twitter/X.com video using TranscriptionPipeline (same as YouTube)"""
-    metadata = context.bot_data.get("metadata", load_metadata())
-    bot = context.bot
-    chat_id = update.effective_chat.id
+    from trns.bot.server import bot_metadata
+    
+    metadata = bot_metadata if bot_metadata else load_metadata()
+    chat_id = message.chat.id
+    
+    # Get shutdown flag from task info (created atomically in handler)
+    shutdown_flag = None
+    with processing_lock:
+        if user_id in user_processing_tasks:
+            shutdown_flag = user_processing_tasks[user_id].get("shutdown_flag")
+    
+    if shutdown_flag is None:
+        logger.error(f"Shutdown flag not found for user {user_id}")
+        try:
+            await client.send_message(chat_id=chat_id, text=get_text(metadata, "error_occurred") + " Internal error: missing shutdown flag.")
+        except Exception as e:
+            logger.error(f"Error sending error message: {e}")
+        return
     
     try:
         # For Twitter, use the URL directly as video_id (yt-dlp handles Twitter URLs)
@@ -467,24 +513,21 @@ async def process_twitter_video(url: str, user_id: int, update: Update, context:
         args = apply_config_to_args(args, config)
         args.url = url  # Use full URL for yt-dlp
         
-        # Create shutdown flag
-        shutdown_flag = threading.Event()
-        
-        # Store shutdown flag for cancellation (will be updated with tasks later)
-        with processing_lock:
-            if user_id not in user_processing_tasks:
-                user_processing_tasks[user_id] = {}
-            user_processing_tasks[user_id]["shutdown_flag"] = shutdown_flag
-            user_processing_tasks[user_id]["type"] = "twitter"
-        
-        # Validate bot instance
-        if bot is None:
-            logger.error(f"Bot instance is None for user_id={user_id}, chat_id={chat_id}")
-            await update.message.reply_text(get_text(metadata, "error_occurred") + " Bot instance is invalid.")
+        # Validate client instance
+        if client is None:
+            logger.error(f"Client instance is None for user_id={user_id}, chat_id={chat_id}")
+            try:
+                await message.reply_text(get_text(metadata, "error_occurred") + " Client instance is invalid.")
+            except Exception as e:
+                logger.error(f"Error sending error message: {e}")
             return
         
         # Send processing started message
-        await bot.send_message(chat_id=chat_id, text=get_text(metadata, "processing_started"))
+        try:
+            await client.send_message(chat_id=chat_id, text=get_text(metadata, "processing_started"))
+        except Exception as e:
+            logger.error(f"Error sending processing started message: {e}")
+            # Continue anyway
         
         # Use a queue to send output in real-time
         output_queue = queue.Queue()
@@ -550,13 +593,13 @@ async def process_twitter_video(url: str, user_id: int, update: Update, context:
                     except queue.Empty:
                         if shutdown_flag.is_set():
                             if buffer.strip():
-                                await send_text_to_telegram(bot, chat_id, buffer)
+                                await send_text_to_telegram(client, chat_id, buffer)
                             break
                         continue
                     
                     if text is None:
                         if buffer.strip():
-                            await send_text_to_telegram(bot, chat_id, buffer)
+                            await send_text_to_telegram(client, chat_id, buffer)
                         break
                     
                     buffer += text
@@ -571,7 +614,7 @@ async def process_twitter_video(url: str, user_id: int, update: Update, context:
                     )
                     
                     if should_send and buffer.strip():
-                        await send_text_to_telegram(bot, chat_id, buffer)
+                        await send_text_to_telegram(client, chat_id, buffer)
                         buffer = ""
                         last_send_time = current_time
                     
@@ -588,7 +631,7 @@ async def process_twitter_video(url: str, user_id: int, update: Update, context:
         try:
             executor_task = loop.run_in_executor(None, run_pipeline)
             
-            # Update task info with executor task
+            # Update task info with executor task atomically
             with processing_lock:
                 if user_id in user_processing_tasks:
                     user_processing_tasks[user_id]["executor_task"] = executor_task
@@ -600,85 +643,110 @@ async def process_twitter_video(url: str, user_id: int, update: Update, context:
             logger.info(f"Pipeline executor task cancelled for user {user_id}")
             if executor_task and not executor_task.done():
                 executor_task.cancel()
-        except Exception as e:
-            logger.exception(f"Error in pipeline execution: {e}")
-            await bot.send_message(chat_id=chat_id, text=f"{get_text(metadata, 'error_occurred')} {str(e)}")
-        finally:
-            # Wait for output task to finish (with timeout)
-            try:
-                await asyncio.wait_for(output_task, timeout=5.0)
-            except asyncio.TimeoutError:
-                logger.warning("Timeout waiting for output task")
-                output_task.cancel()
                 try:
-                    await output_task
+                    await executor_task
                 except asyncio.CancelledError:
                     pass
+        except Exception as e:
+            logger.exception(f"Error in pipeline execution: {e}")
+            try:
+                await client.send_message(chat_id=chat_id, text=f"{get_text(metadata, 'error_occurred')} {str(e)}")
+            except Exception as e2:
+                logger.error(f"Error sending error message: {e2}")
+        finally:
+            # Always wait for output task to finish (with timeout - increased to 30s for LM processing)
+            try:
+                await asyncio.wait_for(output_task, timeout=30.0)
+            except asyncio.TimeoutError:
+                logger.warning("Timeout waiting for output task, cancelling")
+                output_task.cancel()
+                try:
+                    await asyncio.wait_for(output_task, timeout=5.0)
+                except (asyncio.TimeoutError, asyncio.CancelledError):
+                    pass
+            except asyncio.CancelledError:
+                pass
         
         # Only send completion message if not cancelled
         if not shutdown_flag.is_set():
             try:
-                await bot.send_message(chat_id=chat_id, text=get_text(metadata, "processing_complete"))
+                await client.send_message(chat_id=chat_id, text=get_text(metadata, "processing_complete"))
             except Exception as e:
                 logger.debug(f"Error sending completion message: {e}")
         
         # Reset context after processing
         reset_context()
         
-        # Clear processing state
-        with processing_lock:
-            if user_id in user_processing_tasks:
-                del user_processing_tasks[user_id]
-        
     except asyncio.CancelledError:
         logger.info(f"Processing cancelled for user {user_id}")
         try:
-            await bot.send_message(chat_id=chat_id, text=get_text(metadata, "cancel_success"))
+            await client.send_message(chat_id=chat_id, text=get_text(metadata, "cancel_success"))
         except Exception as e:
             logger.debug(f"Error sending cancel message: {e}")
         # Reset context on cancel
         reset_context()
-        with processing_lock:
-            if user_id in user_processing_tasks:
-                del user_processing_tasks[user_id]
     except Exception as e:
         logger.exception(f"Error processing Twitter video: {e}")
         error_text = get_text(metadata, "error_occurred")
         try:
-            await bot.send_message(chat_id=chat_id, text=f"{error_text} {str(e)}")
+            await client.send_message(chat_id=chat_id, text=f"{error_text} {str(e)}")
         except Exception as e2:
-            logger.debug(f"Error sending error message: {e2}")
+            logger.error(f"Error sending error message: {e2}")
         # Reset context on error
         reset_context()
+    finally:
+        # Always clear processing state in finally block
         with processing_lock:
             if user_id in user_processing_tasks:
                 del user_processing_tasks[user_id]
 
 
-async def process_video_file(video_path: str, user_id: int, update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def process_video_file(video_path: str, user_id: int, client: Client, message: Message):
     """Process uploaded video file using TranscriptionPipeline with full processing"""
-    metadata = context.bot_data.get("metadata", load_metadata())
-    bot = context.bot
-    chat_id = update.effective_chat.id
+    from trns.bot.server import bot_metadata
     
+    metadata = bot_metadata if bot_metadata else load_metadata()
+    chat_id = message.chat.id
+    
+    # Get shutdown flag from task info (created atomically in handler)
+    shutdown_flag = None
+    with processing_lock:
+        if user_id in user_processing_tasks:
+            shutdown_flag = user_processing_tasks[user_id].get("shutdown_flag")
+    
+    if shutdown_flag is None:
+        logger.error(f"Shutdown flag not found for user {user_id}")
+        try:
+            await client.send_message(chat_id=chat_id, text=get_text(metadata, "error_occurred") + " Internal error: missing shutdown flag.")
+        except Exception as e:
+            logger.error(f"Error sending error message: {e}")
+        return
+    
+    audio_path = None
     try:
         # Extract audio from video using ffmpeg
         import subprocess
         
         temp_dir = tempfile.gettempdir()
-        audio_path = os.path.join(temp_dir, f"telegram_audio_{user_id}_{os.path.basename(video_path)}.wav")
+        # Use MP3 format for faster extraction and smaller temp files
+        audio_path = os.path.join(temp_dir, f"telegram_audio_{user_id}_{os.path.basename(video_path)}.mp3")
         
-        # Extract audio (silently)
+        # Extract audio (silently) - MP3 is much faster than uncompressed WAV
         ffmpeg_cmd = [
             "ffmpeg", "-i", video_path,
-            "-vn", "-acodec", "pcm_s16le",
+            "-vn", "-acodec", "libmp3lame",
             "-ar", "16000", "-ac", "1",
+            "-b:a", "32k",
             "-y", audio_path
         ]
         
+        import time
+        ffmpeg_start = time.time()
         result = subprocess.run(ffmpeg_cmd, capture_output=True, text=True)
         if result.returncode != 0:
             raise Exception(f"FFmpeg error: {result.stderr}")
+        ffmpeg_time = time.time() - ffmpeg_start
+        logger.info(f"[PERF] Audio extraction completed in {ffmpeg_time:.1f}s")
         
         # Load config
         config = load_config_main()
@@ -694,18 +762,21 @@ async def process_video_file(video_path: str, user_id: int, update: Update, cont
         args.url = ""  # Not a YouTube URL
         args.process_mode = "full"  # Process entire video at once
         
-        # Create shutdown flag
-        shutdown_flag = threading.Event()
-        
-        # Store shutdown flag for cancellation (will be updated with tasks later)
-        with processing_lock:
-            if user_id not in user_processing_tasks:
-                user_processing_tasks[user_id] = {}
-            user_processing_tasks[user_id]["shutdown_flag"] = shutdown_flag
-            user_processing_tasks[user_id]["type"] = "video_file"
+        # Validate client instance
+        if client is None:
+            logger.error(f"Client instance is None for user_id={user_id}, chat_id={chat_id}")
+            try:
+                await message.reply_text(get_text(metadata, "error_occurred") + " Client instance is invalid.")
+            except Exception as e:
+                logger.error(f"Error sending error message: {e}")
+            return
         
         # Send processing started message
-        await bot.send_message(chat_id=chat_id, text=get_text(metadata, "processing_started"))
+        try:
+            await client.send_message(chat_id=chat_id, text=get_text(metadata, "processing_started"))
+        except Exception as e:
+            logger.error(f"Error sending processing started message: {e}")
+            # Continue anyway
         
         # Use a queue to send output in real-time
         output_queue = queue.Queue()
@@ -730,8 +801,8 @@ async def process_video_file(video_path: str, user_id: int, update: Update, cont
             """Run pipeline with captured print output and local audio file"""
             builtins.print = capture_print
             try:
-                from youtube_live_transcription.whisper_transcriber import WhisperTranscriber
-                from youtube_live_transcription.language_model import LMProcessor
+                from trns.transcription.whisper_transcriber import WhisperTranscriber
+                from trns.transcription.language_model import LMProcessor
                 from datetime import datetime
                 
                 # Initialize transcriber
@@ -753,9 +824,11 @@ async def process_video_file(video_path: str, user_id: int, update: Update, cont
                 # Get transcription model
                 model = transcriber._get_transcription_model(detected_language)
                 
-                # Transcribe (silently)
+                # Transcribe (silently) - using beam_size=3 for balance between speed and accuracy
+                import time
+                transcription_start = time.time()
                 if transcriber.use_faster_whisper:
-                    segments, info = model.transcribe(audio_path, beam_size=5)
+                    segments, info = model.transcribe(audio_path, beam_size=3)
                     all_segments = []
                     for segment in segments:
                         if shutdown_flag.is_set():
@@ -785,6 +858,9 @@ async def process_video_file(video_path: str, user_id: int, update: Update, cont
                 if shutdown_flag.is_set():
                     return
                 
+                transcription_time = time.time() - transcription_start
+                logger.info(f"[PERF] Whisper transcription completed in {transcription_time:.1f}s")
+                
                 # Translate
                 if text.strip():
                     if detected_language != 'ru':
@@ -804,8 +880,11 @@ async def process_video_file(video_path: str, user_id: int, update: Update, cont
                     print(output_text)
                     
                     # Process through LM if enabled
+                    logger.info(f"[LM] Checking LM config: has lm_output_mode={hasattr(args, 'lm_output_mode')}, mode={getattr(args, 'lm_output_mode', 'NOT SET')}")
                     if hasattr(args, 'lm_output_mode') and args.lm_output_mode != "transcriptions-only":
                         try:
+                            logger.info(f"[LM] Starting LM processing with mode: {args.lm_output_mode}")
+                            lm_start = time.time()
                             lm_processor = LMProcessor(
                                 api_key_file=getattr(args, 'lm_api_key_file', 'api_key.txt'),
                                 prompt_file=getattr(args, 'lm_prompt_file', 'prompt.md'),
@@ -826,12 +905,26 @@ async def process_video_file(video_path: str, user_id: int, update: Update, cont
                             }]
                             
                             if not shutdown_flag.is_set():
+                                logger.info("[LM] Calling process_transcription_window...")
                                 report = lm_processor.process_transcription_window(transcription_data)
+                                logger.info(f"[LM] Report generated: {bool(report)}, length: {len(report) if report else 0}")
                                 if report:
                                     # Send LM Report label as separate message
-                                    print(f"\n{get_text(metadata, 'lm_report_label')}")
+                                    logger.info(f"[LM] Sending report to user via print()")
+                                    lm_label = get_text(metadata, 'lm_report_label')
+                                    logger.info(f"[LM] Label text: {lm_label}")
+                                    print(f"\n{lm_label}")
+                                    logger.info(f"[LM] Printing report (first 100 chars): {report[:100]}...")
                                     print(report)
+                                    logger.info("[LM] Report printed successfully")
+                                else:
+                                    logger.warning("[LM] No report generated from LM processor")
+                            else:
+                                logger.info("[LM] Shutdown flag set, skipping report generation")
+                            lm_time = time.time() - lm_start
+                            logger.info(f"[PERF] LM processing completed in {lm_time:.1f}s")
                         except Exception as e:
+                            logger.exception(f"LM processing error: {e}")
                             print(f"LM processing error: {e}")
                 
                 # Clean up audio file
@@ -872,13 +965,13 @@ async def process_video_file(video_path: str, user_id: int, update: Update, cont
                     except queue.Empty:
                         if shutdown_flag.is_set():
                             if buffer.strip():
-                                await send_text_to_telegram(bot, chat_id, buffer)
+                                await send_text_to_telegram(client, chat_id, buffer)
                             break
                         continue
                     
                     if text is None:
                         if buffer.strip():
-                            await send_text_to_telegram(bot, chat_id, buffer)
+                            await send_text_to_telegram(client, chat_id, buffer)
                         break
                     
                     buffer += text
@@ -893,7 +986,7 @@ async def process_video_file(video_path: str, user_id: int, update: Update, cont
                     )
                     
                     if should_send and buffer.strip():
-                        await send_text_to_telegram(bot, chat_id, buffer)
+                        await send_text_to_telegram(client, chat_id, buffer)
                         buffer = ""
                         last_send_time = current_time
                     
@@ -910,7 +1003,7 @@ async def process_video_file(video_path: str, user_id: int, update: Update, cont
         try:
             executor_task = loop.run_in_executor(None, run_pipeline)
             
-            # Update task info with executor task
+            # Update task info with executor task atomically
             with processing_lock:
                 if user_id in user_processing_tasks:
                     user_processing_tasks[user_id]["executor_task"] = executor_task
@@ -922,74 +1015,89 @@ async def process_video_file(video_path: str, user_id: int, update: Update, cont
             logger.info(f"Pipeline executor task cancelled for user {user_id}")
             if executor_task and not executor_task.done():
                 executor_task.cancel()
-        except Exception as e:
-            logger.exception(f"Error in pipeline execution: {e}")
-            await bot.send_message(chat_id=chat_id, text=f"{get_text(metadata, 'error_occurred')} {str(e)}")
-        finally:
-            # Wait for output task to finish (with timeout)
-            try:
-                await asyncio.wait_for(output_task, timeout=5.0)
-            except asyncio.TimeoutError:
-                logger.warning("Timeout waiting for output task")
-                output_task.cancel()
                 try:
-                    await output_task
+                    await executor_task
                 except asyncio.CancelledError:
                     pass
+        except Exception as e:
+            logger.exception(f"Error in pipeline execution: {e}")
+            try:
+                await client.send_message(chat_id=chat_id, text=f"{get_text(metadata, 'error_occurred')} {str(e)}")
+            except Exception as e2:
+                logger.error(f"Error sending error message: {e2}")
+        finally:
+            # Always wait for output task to finish (with timeout - increased to 30s for LM processing)
+            try:
+                await asyncio.wait_for(output_task, timeout=30.0)
+            except asyncio.TimeoutError:
+                logger.warning("Timeout waiting for output task, cancelling")
+                output_task.cancel()
+                try:
+                    await asyncio.wait_for(output_task, timeout=5.0)
+                except (asyncio.TimeoutError, asyncio.CancelledError):
+                    pass
+            except asyncio.CancelledError:
+                pass
         
         # Only send completion message if not cancelled
         if not shutdown_flag.is_set():
             try:
-                await bot.send_message(chat_id=chat_id, text=get_text(metadata, "processing_complete"))
+                await client.send_message(chat_id=chat_id, text=get_text(metadata, "processing_complete"))
             except Exception as e:
                 logger.debug(f"Error sending completion message: {e}")
         
-        # Clean up video file
-        try:
-            if os.path.exists(video_path):
-                os.remove(video_path)
-        except Exception as e:
-            logger.warning(f"Error cleaning up video file: {e}")
-        
         # Reset context after processing
         reset_context()
+        
+    except asyncio.CancelledError:
+        logger.info(f"Processing cancelled for user {user_id}")
+        try:
+            await client.send_message(chat_id=chat_id, text=get_text(metadata, "cancel_success"))
+        except Exception as e:
+            logger.debug(f"Error sending cancel message: {e}")
+        # Reset context on cancel
+        reset_context()
+    except Exception as e:
+        logger.exception(f"Error processing video file: {e}")
+        error_text = get_text(metadata, "error_occurred")
+        try:
+            await client.send_message(chat_id=chat_id, text=f"{error_text} {str(e)}")
+        except Exception as e2:
+            logger.error(f"Error sending error message: {e2}")
+        # Reset context on error
+        reset_context()
+    finally:
+        # Always clean up files and processing state in finally block
+        # Clean up audio file
+        if audio_path and os.path.exists(audio_path):
+            try:
+                os.remove(audio_path)
+            except Exception as e:
+                logger.warning(f"Error cleaning up audio file: {e}")
+        
+        # Clean up video file
+        if video_path and os.path.exists(video_path):
+            try:
+                os.remove(video_path)
+            except Exception as e:
+                logger.warning(f"Error cleaning up video file: {e}")
         
         # Clear processing state
         with processing_lock:
             if user_id in user_processing_tasks:
                 del user_processing_tasks[user_id]
-        
-    except asyncio.CancelledError:
-        logger.info(f"Processing cancelled for user {user_id}")
-        try:
-            await bot.send_message(chat_id=chat_id, text=get_text(metadata, "cancel_success"))
-        except Exception as e:
-            logger.debug(f"Error sending cancel message: {e}")
-        # Reset context on cancel
-        reset_context()
-        with processing_lock:
-            if user_id in user_processing_tasks:
-                del user_processing_tasks[user_id]
-    except Exception as e:
-        logger.exception(f"Error processing video file: {e}")
-        error_text = get_text(metadata, "error_occurred")
-        try:
-            await bot.send_message(chat_id=chat_id, text=f"{error_text} {str(e)}")
-        except Exception as e2:
-            logger.debug(f"Error sending error message: {e2}")
-        # Reset context on error
-        reset_context()
-        with processing_lock:
-            if user_id in user_processing_tasks:
-                del user_processing_tasks[user_id]
 
 
-async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def handle_text_message(client: Client, message: Message) -> None:
     """Handle text messages (authentication, YouTube links, button clicks, context, tokens)"""
-    user_id = update.effective_user.id
-    text = update.message.text
-    metadata = context.bot_data.get("metadata", load_metadata())
-    keyboard = context.bot_data.get("keyboard")
+    from trns.bot.server import bot_metadata, bot_keyboard
+    
+    user_id = message.from_user.id
+    text = message.text
+    metadata = bot_metadata if bot_metadata else load_metadata()
+    keyboard = bot_keyboard
+    
+    logger.info(f"[TEXT] Received text message from user {user_id}: {text[:100] if text else 'None'}...")
     
     # Check authentication (except for /cancel which is handled separately)
     if not is_user_authenticated(user_id):
@@ -1001,17 +1109,17 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
                 if text.strip() == auth_key:
                     add_authenticated_user(user_id)
                     set_user_state(user_id, None)
-                    await update.message.reply_text(
+                    await message.reply_text(
                         get_text(metadata, "auth_success"),
                         reply_markup=keyboard
                     )
                 else:
-                    await update.message.reply_text(get_text(metadata, "invalid_key"))
+                    await message.reply_text(get_text(metadata, "invalid_key"))
             except Exception as e:
                 logger.error(f"Error checking auth key: {e}")
-                await update.message.reply_text(get_text(metadata, "error_occurred") + f" {str(e)}")
+                await message.reply_text(get_text(metadata, "error_occurred") + f" {str(e)}")
         else:
-            await update.message.reply_text(get_text(metadata, "not_authenticated"))
+            await message.reply_text(get_text(metadata, "not_authenticated"))
         return
     
     # Handle button clicks
@@ -1019,10 +1127,10 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
     cancel_btn_text = get_text(metadata, "cancel_button")
     
     if text == context_btn_text:
-        await handle_context_button(update, context)
+        await handle_context_button(client, message)
         return
     elif text == cancel_btn_text:
-        await cancel_command(update, context)
+        await cancel_command(client, message)
         return
     
     # Handle state-based inputs
@@ -1032,18 +1140,31 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         # User is entering context
         update_context(text)
         set_user_state(user_id, None)
-        await update.message.reply_text(
+        await message.reply_text(
             get_text(metadata, "context_set"),
             reply_markup=keyboard
         )
         return
+    
     # Check if it's a YouTube URL
-    if is_youtube_url(text):
-        # Check if already processing
+    is_yt = is_youtube_url(text)
+    logger.info(f"[TEXT] YouTube URL check: {is_yt} for text: {text[:100] if text else 'None'}")
+    if is_yt:
+        # Check if already processing and create task info atomically
+        shutdown_flag = threading.Event()
         with processing_lock:
             if user_id in user_processing_tasks:
-                await update.message.reply_text(get_text(metadata, "processing_video"))
+                # Already processing, inform user
+                asyncio.create_task(
+                    message.reply_text(get_text(metadata, "processing_video"))
+                ).add_done_callback(lambda t: handle_task_error(t, user_id))
                 return
+            
+            # Create task info atomically before starting processing
+            user_processing_tasks[user_id] = {
+                "shutdown_flag": shutdown_flag,
+                "type": "youtube"
+            }
         
         # Set processing state
         set_user_state(user_id, STATE_PROCESSING)
@@ -1052,41 +1173,62 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         capacity, should_warn = check_capacity_at_start()
         if should_warn:
             warning_text = get_text(metadata, "token_warning")
-            await update.message.reply_text(warning_text)
+            asyncio.create_task(
+                message.reply_text(warning_text)
+            ).add_done_callback(lambda t: handle_task_error(t, user_id))
         
         # Send initial processing message
-        chat_id = update.effective_chat.id
+        chat_id = message.chat.id
         try:
-            await update.message.reply_text(get_text(metadata, "processing_youtube"))
+            await message.reply_text(get_text(metadata, "processing_youtube"))
             logger.info(f"Initial processing message sent successfully to chat_id={chat_id}")
         except Exception as e:
             logger.error(f"Failed to send initial processing message to chat_id={chat_id}: {e}", exc_info=True)
+            # Clean up on error
+            with processing_lock:
+                if user_id in user_processing_tasks:
+                    del user_processing_tasks[user_id]
+            set_user_state(user_id, None)
+            return
         
-        # Start processing in background
-        task = asyncio.create_task(process_youtube_video(text, user_id, update, context))
+        # Start processing in background (fire-and-forget)
+        async def process_with_cleanup():
+            """Process video and ensure cleanup"""
+            try:
+                await process_youtube_video(text, user_id, client, message)
+            finally:
+                # Always clear state, even on error
+                set_user_state(user_id, None)
         
-        # Update task info (shutdown_flag already set in process_youtube_video)
+        task = asyncio.create_task(process_with_cleanup())
+        task.add_done_callback(lambda t: handle_task_error(t, user_id))
+        
+        # Update task info with the async task
         with processing_lock:
             if user_id in user_processing_tasks:
                 user_processing_tasks[user_id]["task"] = task
-                user_processing_tasks[user_id]["type"] = "youtube"
-            else:
-                user_processing_tasks[user_id] = {"task": task, "type": "youtube", "shutdown_flag": threading.Event()}
         
-        # Clear processing state when done
-        try:
-            await task
-        finally:
-            set_user_state(user_id, None)
         return
     
     # Check if it's a Twitter/X.com URL
-    if is_twitter_url(text):
-        # Check if already processing
+    is_tw = is_twitter_url(text)
+    logger.info(f"[TEXT] Twitter URL check: {is_tw} for text: {text[:100] if text else 'None'}")
+    if is_tw:
+        # Check if already processing and create task info atomically
+        shutdown_flag = threading.Event()
         with processing_lock:
             if user_id in user_processing_tasks:
-                await update.message.reply_text(get_text(metadata, "processing_video"))
+                # Already processing, inform user
+                asyncio.create_task(
+                    message.reply_text(get_text(metadata, "processing_video"))
+                ).add_done_callback(lambda t: handle_task_error(t, user_id))
                 return
+            
+            # Create task info atomically before starting processing
+            user_processing_tasks[user_id] = {
+                "shutdown_flag": shutdown_flag,
+                "type": "twitter"
+            }
         
         # Set processing state
         set_user_state(user_id, STATE_PROCESSING)
@@ -1095,149 +1237,215 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         capacity, should_warn = check_capacity_at_start()
         if should_warn:
             warning_text = get_text(metadata, "token_warning")
-            await update.message.reply_text(warning_text)
+            asyncio.create_task(
+                message.reply_text(warning_text)
+            ).add_done_callback(lambda t: handle_task_error(t, user_id))
         
         # Send initial processing message
-        chat_id = update.effective_chat.id
+        chat_id = message.chat.id
         try:
-            await update.message.reply_text(get_text(metadata, "processing_twitter"))
+            await message.reply_text(get_text(metadata, "processing_twitter"))
             logger.info(f"Initial processing message sent successfully to chat_id={chat_id}")
         except Exception as e:
             logger.error(f"Failed to send initial processing message to chat_id={chat_id}: {e}", exc_info=True)
+            # Clean up on error
+            with processing_lock:
+                if user_id in user_processing_tasks:
+                    del user_processing_tasks[user_id]
+            set_user_state(user_id, None)
+            return
         
-        # Start processing in background
-        task = asyncio.create_task(process_twitter_video(text, user_id, update, context))
+        # Start processing in background (fire-and-forget)
+        async def process_with_cleanup():
+            """Process video and ensure cleanup"""
+            try:
+                await process_twitter_video(text, user_id, client, message)
+            finally:
+                # Always clear state, even on error
+                set_user_state(user_id, None)
         
-        # Update task info (shutdown_flag already set in process_twitter_video)
+        task = asyncio.create_task(process_with_cleanup())
+        task.add_done_callback(lambda t: handle_task_error(t, user_id))
+        
+        # Update task info with the async task
         with processing_lock:
             if user_id in user_processing_tasks:
                 user_processing_tasks[user_id]["task"] = task
-                user_processing_tasks[user_id]["type"] = "twitter"
-            else:
-                user_processing_tasks[user_id] = {"task": task, "type": "twitter", "shutdown_flag": threading.Event()}
-        
-        # Clear processing state when done
-        try:
-            await task
-        finally:
-            set_user_state(user_id, None)
         
         return
     
     # Unknown text
-    await update.message.reply_text(
+    await message.reply_text(
         get_text(metadata, "unknown_text"),
         reply_markup=keyboard
     )
 
 
-async def handle_video_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle video file uploads"""
-    user_id = update.effective_user.id
-    metadata = context.bot_data.get("metadata", load_metadata())
-    keyboard = context.bot_data.get("keyboard")
+async def handle_video_message(client: Client, message: Message) -> None:
+    """Handle video file uploads - now supports up to 2GB with Pyrogram"""
+    from trns.bot.server import bot_metadata, bot_keyboard
+    
+    user_id = message.from_user.id
+    metadata = bot_metadata if bot_metadata else load_metadata()
+    keyboard = bot_keyboard
     
     # Check authentication
     if not is_user_authenticated(user_id):
-        await update.message.reply_text(get_text(metadata, "not_authenticated"))
+        await message.reply_text(get_text(metadata, "not_authenticated"))
         return
     
-    # Check if already processing
-    with processing_lock:
-        if user_id in user_processing_tasks:
-            await update.message.reply_text(get_text(metadata, "processing_video"))
-            return
-    
-    # Get video file
-    video = update.message.video or update.message.document
+    # Get video file first (quick check, no I/O)
+    video = message.video or message.document
     if not video:
-        await update.message.reply_text(get_text(metadata, "no_video_file"))
+        await message.reply_text(get_text(metadata, "no_video_file"))
+        return
+    
+    # Check file size - Pyrogram supports up to 2GB
+    file_size = video.file_size
+    MAX_FILE_SIZE = 2 * 1024 * 1024 * 1024  # 2GB in bytes
+    
+    if file_size > MAX_FILE_SIZE:
+        await message.reply_text(
+            f"❌ File is too large ({file_size / (1024*1024*1024):.2f} GB). "
+            f"Maximum size is {MAX_FILE_SIZE / (1024*1024*1024):.0f} GB."
+        )
         return
     
     # Check token warning
     if check_token_warning():
         warning_text = get_text(metadata, "token_warning")
-        await update.message.reply_text(warning_text)
+        await message.reply_text(warning_text)
     
     # Set processing state
     set_user_state(user_id, STATE_PROCESSING)
     
-    await update.message.reply_text(get_text(metadata, "downloading_video"))
+    # Create shutdown flag and task info atomically BEFORE any I/O operations
+    # This prevents race condition where two concurrent requests both pass the check
+    shutdown_flag = threading.Event()
+    with processing_lock:
+        if user_id in user_processing_tasks:
+            # Already processing, inform user
+            asyncio.create_task(
+                message.reply_text(get_text(metadata, "processing_video"))
+            ).add_done_callback(lambda t: handle_task_error(t, user_id))
+            set_user_state(user_id, None)
+            return
+        
+        # Create task info atomically before starting processing
+        user_processing_tasks[user_id] = {
+            "shutdown_flag": shutdown_flag,
+            "type": "file"
+        }
     
-    # Download video file
+    # Now safe to do I/O operations - user is marked as processing
+    await message.reply_text(get_text(metadata, "downloading_video"))
+    
+    # Download video file using Pyrogram
+    video_path = None
     try:
-        video_file = await context.bot.get_file(video.file_id)
         temp_dir = tempfile.gettempdir()
-        video_path = os.path.join(temp_dir, f"telegram_video_{user_id}_{video.file_id}.{video.file_name.split('.')[-1] if video.file_name else 'mp4'}")
+        # Determine file extension
+        if hasattr(video, 'file_name') and video.file_name:
+            file_ext = video.file_name.split('.')[-1]
+        elif message.video:
+            file_ext = 'mp4'
+        else:
+            file_ext = 'mp4'
         
-        await video_file.download_to_drive(video_path)
+        video_path = os.path.join(temp_dir, f"telegram_video_{user_id}_{video.file_id}.{file_ext}")
         
-        # Process video
-        task = asyncio.create_task(process_video_file(video_path, user_id, update, context))
+        # Pyrogram download - much simpler!
+        import time
+        download_start = time.time()
+        await message.download(file_name=video_path)
+        download_time = time.time() - download_start
+        logger.info(f"[PERF] Video download completed in {download_time:.1f}s ({file_size / (1024*1024):.1f}MB)")
         
-        # Update task info
+        # Start processing in background (fire-and-forget)
+        async def process_with_cleanup():
+            """Process video and ensure cleanup"""
+            try:
+                await process_video_file(video_path, user_id, client, message)
+            finally:
+                # Always clear state, even on error
+                set_user_state(user_id, None)
+        
+        task = asyncio.create_task(process_with_cleanup())
+        task.add_done_callback(lambda t: handle_task_error(t, user_id))
+        
+        # Update task info with the async task
         with processing_lock:
             if user_id in user_processing_tasks:
                 user_processing_tasks[user_id]["task"] = task
-                user_processing_tasks[user_id]["type"] = "file"
-            else:
-                user_processing_tasks[user_id] = {"task": task, "type": "file"}
-        
-        # Clear processing state when done
-        try:
-            await task
-        finally:
-            set_user_state(user_id, None)
             
     except Exception as e:
         logger.exception(f"Error handling video: {e}")
         error_text = get_text(metadata, "error_occurred")
-        await update.message.reply_text(f"{error_text} {str(e)}", reply_markup=keyboard)
+        try:
+            await message.reply_text(f"{error_text} {str(e)}", reply_markup=keyboard)
+        except Exception as e2:
+            logger.error(f"Error sending error message: {e2}")
+        # Clean up on error
+        with processing_lock:
+            if user_id in user_processing_tasks:
+                del user_processing_tasks[user_id]
         set_user_state(user_id, None)
+        # Clean up downloaded file if it exists
+        if video_path and os.path.exists(video_path):
+            try:
+                os.remove(video_path)
+            except Exception as e3:
+                logger.warning(f"Error cleaning up video file: {e3}")
 
 
-async def handle_context_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def handle_context_button(client: Client, message: Message) -> None:
     """Handle context button click"""
-    user_id = update.effective_user.id
-    metadata = context.bot_data.get("metadata", load_metadata())
+    from trns.bot.server import bot_metadata
+    
+    user_id = message.from_user.id
+    metadata = bot_metadata if bot_metadata else load_metadata()
     
     set_user_state(user_id, STATE_WAITING_CONTEXT)
-    await update.message.reply_text(get_text(metadata, "enter_context"))
+    await message.reply_text(get_text(metadata, "enter_context"))
 
 
-async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle errors"""
-    logger.error(f"Exception while handling an update: {context.error}", exc_info=context.error)
-    
-    # Try to send error message to user if update is available
-    if isinstance(update, Update) and update.effective_message:
-        metadata = context.bot_data.get("metadata", load_metadata())
-        error_text = get_text(metadata, "error_occurred")
-        try:
-            await update.effective_message.reply_text(f"{error_text} {str(context.error)}")
-        except Exception:
-            pass
-
-
-def setup_handlers(application: Application, metadata: dict, keyboard: ReplyKeyboardMarkup):
-    """Setup all handlers for the bot application"""
-    # Add command handlers
-    application.add_handler(CommandHandler("start", start_command))
-    application.add_handler(CommandHandler("cancel", cancel_command))
-    application.add_handler(CommandHandler("stats", stats_command))
-    
-    # Handle button clicks (they come as text messages)
-    application.add_handler(MessageHandler(
-        filters.TEXT & ~filters.COMMAND,
-        handle_text_message
-    ))
-    
-    # Handle video files
-    application.add_handler(MessageHandler(
-        filters.VIDEO | filters.Document.VIDEO,
-        handle_video_message
-    ))
-    
-    # Add error handler
-    application.add_error_handler(error_handler)
-
+async def route_update(client: Client, update: Update):
+    """Route Pyrogram updates to appropriate handlers"""
+    try:
+        # Check if update has a message
+        if not update.message:
+            logger.debug("Update has no message, ignoring")
+            return
+        
+        message = update.message
+        
+        # Handle commands
+        if message.text and message.text.startswith('/'):
+            command = message.text.split()[0].lower()
+            
+            if command == '/start':
+                await start_command(client, message)
+            elif command == '/cancel':
+                await cancel_command(client, message)
+            elif command == '/stats':
+                await stats_command(client, message)
+            else:
+                # Unknown command
+                logger.debug(f"Unknown command: {command}")
+            return
+        
+        # Handle text messages
+        if message.text:
+            await handle_text_message(client, message)
+            return
+        
+        # Handle video messages
+        if message.video or (message.document and message.document.mime_type and 'video' in message.document.mime_type):
+            await handle_video_message(client, message)
+            return
+        
+        # If we get here, it's an unsupported message type
+        logger.debug(f"Unsupported message type from user {message.from_user.id}")
+        
+    except Exception as e:
+        logger.exception(f"Error routing update: {e}")

@@ -58,9 +58,19 @@ class WhisperTranscriber:
             if self.use_faster_whisper:
                 try:
                     from faster_whisper import WhisperModel
+                    import os
+                    # Optimize for CPU: use all available threads
+                    cpu_threads = max(1, os.cpu_count() - 1) if os.cpu_count() else 4
+                    logger.info(f"Initializing faster-whisper with {cpu_threads} CPU threads...")
                     # Initialize tiny model for language detection and English transcription
                     logger.info("Initializing faster-whisper tiny model (for language detection and English)...")
-                    self.language_detector = WhisperModel("tiny", device="cpu", compute_type="int8")
+                    self.language_detector = WhisperModel(
+                        "tiny", 
+                        device="cpu", 
+                        compute_type="int8",
+                        cpu_threads=cpu_threads,
+                        num_workers=1
+                    )
                     self.tiny_model = self.language_detector  # Reuse for English
                     logger.info("Tiny model loaded successfully")
                     
@@ -108,7 +118,15 @@ class WhisperTranscriber:
             logger.info("Loading small model for non-English transcription...")
             if self.use_faster_whisper:
                 from faster_whisper import WhisperModel
-                self.small_model = WhisperModel("small", device="cpu", compute_type="int8")
+                import os
+                cpu_threads = max(1, os.cpu_count() - 1) if os.cpu_count() else 4
+                self.small_model = WhisperModel(
+                    "small", 
+                    device="cpu", 
+                    compute_type="int8",
+                    cpu_threads=cpu_threads,
+                    num_workers=1
+                )
             else:
                 import whisper
                 self.small_model = whisper.load_model("small")

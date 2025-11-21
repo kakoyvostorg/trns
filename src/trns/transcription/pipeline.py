@@ -123,8 +123,8 @@ class TranscriptionPipeline:
             else:
                 logger.warning("No subtitles available for this video")
                 if self.args.method == "subtitles":
-                    logger.error("Subtitles requested but not available. Exiting.")
-                    sys.exit(1)
+                    logger.error("Subtitles requested but not available.")
+                    raise RuntimeError("Subtitles requested but not available for this video")
                 elif self.args.method == "auto":
                     logger.info("Falling back to Whisper transcription")
                     self.use_subtitles = False
@@ -146,7 +146,7 @@ class TranscriptionPipeline:
                 except Exception as e:
                     logger.error(f"Failed to initialize Whisper: {e}")
                     if self.args.method == "whisper":
-                        sys.exit(1)
+                        raise RuntimeError(f"Failed to initialize Whisper: {e}")
                     elif self.args.method == "auto":
                         logger.warning("Falling back to subtitle extraction only")
                         self.use_whisper = False
@@ -377,7 +377,7 @@ class TranscriptionPipeline:
             
             if not audio_path:
                 logger.error("Failed to download audio file")
-                sys.exit(1)
+                raise RuntimeError("Failed to download audio file from video")
             
             # Transcribe with progress bar
             if self.shutdown_flag():
@@ -665,6 +665,8 @@ class TranscriptionPipeline:
         next_audio_path = None
         next_extract_time = 0
         first_chunk = True
+        consecutive_failures = 0
+        MAX_CONSECUTIVE_FAILURES = 5  # Stop after 5 consecutive failures
         
         try:
             while not self.shutdown_flag():
@@ -712,6 +714,9 @@ class TranscriptionPipeline:
                                 break
                         
                         if segments:
+                            # Reset failure counter on successful subtitle extraction
+                            consecutive_failures = 0
+                            
                             # Combine all new segments
                             text = " ".join([seg['text'] for seg in segments])
                             if text.strip():
@@ -952,6 +957,8 @@ class TranscriptionPipeline:
                                 text, detected_language, language_prob = self.whisper_transcriber.transcribe_audio(audio_path)
                                 
                                 if text.strip():
+                                    # Reset failure counter on successful transcription
+                                    consecutive_failures = 0
                                     if detected_language != 'ru':
                                         translated_text = self.whisper_transcriber.translate_to_russian(text, detected_language)
                                     else:
@@ -1044,11 +1051,24 @@ class TranscriptionPipeline:
                                     next_extract_time = extract_time
                                 else:
                                     # Audio extraction failed, log and skip
-                                    error_msg = f"\n[ERROR] Failed to extract audio chunk. Skipping this chunk.\n"
-                                    logger.error("Audio extraction failed, skipping chunk")
+                                    consecutive_failures += 1
+                                    error_msg = f"\n[ERROR] Failed to extract audio chunk ({consecutive_failures}/{MAX_CONSECUTIVE_FAILURES}). Skipping this chunk.\n"
+                                    logger.error(f"Audio extraction failed, skipping chunk (consecutive failures: {consecutive_failures})")
                                     print(error_msg, flush=True)  # Send error to Telegram via stdout capture
+                                    
+                                    # Stop if too many consecutive failures
+                                    if consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
+                                        error_msg = f"\n[ERROR] Too many consecutive failures ({consecutive_failures}). Stopping transcription.\n"
+                                        logger.error(f"Stopping transcription due to {consecutive_failures} consecutive failures")
+                                        print(error_msg, flush=True)
+                                        break
+                                    
                                     next_audio_path = None
                                 first_chunk = False
+                                
+                                # Reset failure counter on success
+                                if audio_path:
+                                    consecutive_failures = 0
                             
                             # Process completed transcriptions
                             should_break = self._process_transcription_results()
@@ -1057,7 +1077,16 @@ class TranscriptionPipeline:
                                 break
                             
                         except Exception as e:
-                            logger.error(f"Error with Whisper transcription: {e}")
+                            consecutive_failures += 1
+                            logger.error(f"Error with Whisper transcription: {e} (consecutive failures: {consecutive_failures})")
+                            
+                            # Stop if too many consecutive failures
+                            if consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
+                                error_msg = f"\n[ERROR] Too many consecutive failures ({consecutive_failures}). Stopping transcription.\n"
+                                logger.error(f"Stopping transcription due to {consecutive_failures} consecutive failures")
+                                print(error_msg, flush=True)
+                                break
+                            
                             # Continue to next iteration even if this one failed
                 
                 # Process LM results
