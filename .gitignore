@@ -48,9 +48,7 @@ api_key.txt
 bot_key.txt
 key.txt
 
-# Note: config.json now contains sensitive user IDs and should NOT be in git
-# Use config.example.json as a template instead
-# metadata.json and prompt.md are essential project files and should be in git
+
 config.json
 
 # Logs and temporary files
