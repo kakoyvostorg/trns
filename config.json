@@ -17,5 +17,7 @@
   "lm_model": "google/gemma-3-27b-it:free",
   "debug": false,
   "context": "",
-  "allowed_user_ids": []
+  "allowed_user_ids": [
+    489942686
+  ]
 }
