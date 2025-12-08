@@ -1,0 +1,11 @@
+{
+  "123456789": {
+    "show_original_translation": true,
+    "show_transcription": true
+  },
+  "987654321": {
+    "show_original_translation": false,
+    "show_transcription": true
+  }
+}
+

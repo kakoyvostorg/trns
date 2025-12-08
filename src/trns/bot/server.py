@@ -12,6 +12,7 @@ import logging
 import os
 import sys
 from contextlib import asynccontextmanager
+from typing import Optional
 
 from fastapi import FastAPI, Request, Response
 from fastapi.responses import JSONResponse
@@ -20,7 +21,7 @@ from pyrogram import Client
 from pyrogram.types import ReplyKeyboardMarkup, KeyboardButton, Update
 import pyrogram.raw
 
-from trns.bot.utils import load_metadata, get_text
+from trns.bot.utils import load_metadata, get_text, get_user_setting
 
 # Configure logging
 logging.basicConfig(
@@ -76,12 +77,50 @@ def get_api_hash() -> str:
     return api_hash.strip()
 
 
-def create_keyboard(metadata: dict) -> ReplyKeyboardMarkup:
-    """Create persistent keyboard with buttons"""
+def create_keyboard(metadata: dict, user_id: Optional[int] = None) -> ReplyKeyboardMarkup:
+    """
+    Create persistent keyboard with buttons.
+    If user_id is provided, includes dynamic toggle buttons based on user settings.
+    
+    Args:
+        metadata: Metadata dict with translations
+        user_id: Optional user ID for personalized buttons
+    
+    Returns:
+        ReplyKeyboardMarkup with buttons
+    """
     context_btn = KeyboardButton(get_text(metadata, "context_button"))
     cancel_btn = KeyboardButton(get_text(metadata, "cancel_button"))
     
-    keyboard = [[context_btn], [cancel_btn]]
+    keyboard = []
+    
+    # Add toggle buttons if user_id is provided
+    if user_id is not None:
+        # Get user settings (defaults to True)
+        show_original = get_user_setting(user_id, "show_original_translation", default=True)
+        show_transcription = get_user_setting(user_id, "show_transcription", default=True)
+        
+        # Toggle button for original translation
+        if show_original:
+            original_btn_text = get_text(metadata, "hide_original_translation_button")
+        else:
+            original_btn_text = get_text(metadata, "show_original_translation_button")
+        original_btn = KeyboardButton(original_btn_text)
+        
+        # Toggle button for transcription
+        if show_transcription:
+            transcription_btn_text = get_text(metadata, "hide_transcription_button")
+        else:
+            transcription_btn_text = get_text(metadata, "show_transcription_button")
+        transcription_btn = KeyboardButton(transcription_btn_text)
+        
+        # Add toggle buttons in first row (side by side)
+        keyboard.append([original_btn, transcription_btn])
+    
+    # Add context and cancel buttons
+    keyboard.append([context_btn])
+    keyboard.append([cancel_btn])
+    
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
 
 
@@ -100,7 +139,8 @@ async def lifespan(app: FastAPI):
         bot_metadata = load_metadata()
         logger.info("Metadata loaded successfully")
         
-        bot_keyboard = create_keyboard(bot_metadata)
+        # Create default keyboard without user_id (will be recreated per user)
+        bot_keyboard = create_keyboard(bot_metadata, user_id=None)
         
         # Build Pyrogram client with in-memory session to avoid file corruption
         bot_client = Client(

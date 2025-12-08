@@ -29,7 +29,10 @@ from trns.bot.utils import (
     check_capacity_at_start,
     get_daily_capacity,
     load_config as load_config_utils,
-    save_config
+    save_config,
+    initialize_user_settings,
+    get_user_setting,
+    set_user_setting
 )
 
 from trns.transcription.pipeline import TranscriptionPipeline, extract_video_id
@@ -76,14 +79,19 @@ def handle_task_error(task: asyncio.Task, user_id: int):
 
 async def start_command(client: Client, message: Message) -> None:
     """Handle /start command - authentication flow"""
-    from trns.bot.server import bot_metadata, bot_keyboard
+    from trns.bot.server import bot_metadata, create_keyboard
     
     user_id = message.from_user.id
     metadata = bot_metadata if bot_metadata else load_metadata()
-    keyboard = bot_keyboard
     
     # Check if already authenticated
     if is_user_authenticated(user_id):
+        # Initialize user settings if not already done
+        initialize_user_settings(user_id)
+        
+        # Create personalized keyboard for this user
+        keyboard = create_keyboard(metadata, user_id)
+        
         await message.reply_text(
             get_text(metadata, "auth_success"),
             reply_markup=keyboard
@@ -97,11 +105,11 @@ async def start_command(client: Client, message: Message) -> None:
 
 async def cancel_command(client: Client, message: Message) -> None:
     """Handle /cancel command"""
-    from trns.bot.server import bot_metadata, bot_keyboard
+    from trns.bot.server import bot_metadata, create_keyboard
     
     user_id = message.from_user.id
     metadata = bot_metadata if bot_metadata else load_metadata()
-    keyboard = bot_keyboard
+    keyboard = create_keyboard(metadata, user_id)
     
     # Cancel any ongoing processing
     await cancel_user_processing(user_id)
@@ -505,6 +513,10 @@ async def process_twitter_video(url: str, user_id: int, client: Client, message:
         if config is None:
             config = create_default_config()
         
+        # Load user settings
+        show_original = get_user_setting(user_id, "show_original_translation", default=True)
+        show_transcription = get_user_setting(user_id, "show_transcription", default=True)
+        
         # Create a simple args object from config
         class Args:
             pass
@@ -512,6 +524,8 @@ async def process_twitter_video(url: str, user_id: int, client: Client, message:
         args = Args()
         args = apply_config_to_args(args, config)
         args.url = url  # Use full URL for yt-dlp
+        args.show_original_translation = show_original
+        args.show_transcription = show_transcription
         
         # Validate client instance
         if client is None:
@@ -753,6 +767,10 @@ async def process_video_file(video_path: str, user_id: int, client: Client, mess
         if config is None:
             config = create_default_config()
         
+        # Load user settings
+        show_original = get_user_setting(user_id, "show_original_translation", default=True)
+        show_transcription = get_user_setting(user_id, "show_transcription", default=True)
+        
         # Create args object
         class Args:
             pass
@@ -761,6 +779,8 @@ async def process_video_file(video_path: str, user_id: int, client: Client, mess
         args = apply_config_to_args(args, config)
         args.url = ""  # Not a YouTube URL
         args.process_mode = "full"  # Process entire video at once
+        args.show_original_translation = show_original
+        args.show_transcription = show_transcription
         
         # Validate client instance
         if client is None:
@@ -868,16 +888,17 @@ async def process_video_file(video_path: str, user_id: int, client: Client, mess
                     else:
                         translated_text = text
                     
-                    # Format output based on translation_output setting
-                    if args.translation_output == "russian-only":
-                        output_text = translated_text
-                    elif args.translation_output == "both":
-                        output_text = f"[{detected_language}] {text}\n[RU] {translated_text}"
-                    else:
-                        output_text = text
-                    
-                    # Output without timestamp
-                    print(output_text)
+                    # Format output based on user setting
+                    # If show_original_translation is ON and language is not Russian: show both
+                    # Otherwise: show Russian only
+                    if show_transcription:
+                        if show_original and detected_language != 'ru':
+                            output_text = f"[{detected_language}] {text}\n[RU] {translated_text}"
+                        else:
+                            output_text = translated_text
+                        
+                        # Output without timestamp
+                        print(output_text)
                     
                     # Process through LM if enabled
                     logger.info(f"[LM] Checking LM config: has lm_output_mode={hasattr(args, 'lm_output_mode')}, mode={getattr(args, 'lm_output_mode', 'NOT SET')}")
@@ -888,11 +909,14 @@ async def process_video_file(video_path: str, user_id: int, client: Client, mess
                             lm_processor = LMProcessor(
                                 api_key_file=getattr(args, 'lm_api_key_file', 'api_key.txt'),
                                 prompt_file=getattr(args, 'lm_prompt_file', 'prompt.md'),
+                                prompt_original_file=getattr(args, 'lm_prompt_original_file', 'prompt_original.md'),
                                 model=getattr(args, 'lm_model', 'google/gemma-3-27b-it:free'),
                                 window_seconds=getattr(args, 'lm_window_seconds', 120),
                                 interval=getattr(args, 'lm_interval', 30),
                                 context=getattr(args, 'context', ''),
-                                shutdown_flag=lambda: shutdown_flag.is_set()
+                                shutdown_flag=lambda: shutdown_flag.is_set(),
+                                use_bilingual=show_original,
+                                detected_language=detected_language
                             )
                             
                             transcription_data = [{
@@ -914,8 +938,16 @@ async def process_video_file(video_path: str, user_id: int, client: Client, mess
                                     lm_label = get_text(metadata, 'lm_report_label')
                                     logger.info(f"[LM] Label text: {lm_label}")
                                     print(f"\n{lm_label}")
-                                    logger.info(f"[LM] Printing report (first 100 chars): {report[:100]}...")
-                                    print(report)
+                                    
+                                    # Handle bilingual report (tuple) or Russian-only (string)
+                                    if isinstance(report, tuple) and len(report) == 2:
+                                        original_text, russian_text = report
+                                        logger.info(f"[LM] Printing bilingual report")
+                                        print(f"{original_text}\n")
+                                        print(f"{russian_text}\n")
+                                    else:
+                                        logger.info(f"[LM] Printing report (first 100 chars): {str(report)[:100]}...")
+                                        print(report)
                                     logger.info("[LM] Report printed successfully")
                                 else:
                                     logger.warning("[LM] No report generated from LM processor")
@@ -934,7 +966,7 @@ async def process_video_file(video_path: str, user_id: int, client: Client, mess
                 except Exception as e:
                     logger.debug(f"Error cleaning up audio file: {e}")
                 
-                print("Transcription complete!")
+                logger.info("Transcription complete!")
                 
             except Exception as e:
                 logger.exception(f"Error in pipeline: {e}")
@@ -1090,12 +1122,11 @@ async def process_video_file(video_path: str, user_id: int, client: Client, mess
 
 async def handle_text_message(client: Client, message: Message) -> None:
     """Handle text messages (authentication, YouTube links, button clicks, context, tokens)"""
-    from trns.bot.server import bot_metadata, bot_keyboard
+    from trns.bot.server import bot_metadata, create_keyboard
     
     user_id = message.from_user.id
     text = message.text
     metadata = bot_metadata if bot_metadata else load_metadata()
-    keyboard = bot_keyboard
     
     logger.info(f"[TEXT] Received text message from user {user_id}: {text[:100] if text else 'None'}...")
     
@@ -1109,6 +1140,13 @@ async def handle_text_message(client: Client, message: Message) -> None:
                 if text.strip() == auth_key:
                     add_authenticated_user(user_id)
                     set_user_state(user_id, None)
+                    
+                    # Initialize user settings
+                    initialize_user_settings(user_id)
+                    
+                    # Create personalized keyboard
+                    keyboard = create_keyboard(metadata, user_id)
+                    
                     await message.reply_text(
                         get_text(metadata, "auth_success"),
                         reply_markup=keyboard
@@ -1122,15 +1160,26 @@ async def handle_text_message(client: Client, message: Message) -> None:
             await message.reply_text(get_text(metadata, "not_authenticated"))
         return
     
-    # Handle button clicks
+    # Get button texts from metadata (need to check both states of toggle buttons)
     context_btn_text = get_text(metadata, "context_button")
     cancel_btn_text = get_text(metadata, "cancel_button")
+    show_original_btn = get_text(metadata, "show_original_translation_button")
+    hide_original_btn = get_text(metadata, "hide_original_translation_button")
+    show_transcription_btn = get_text(metadata, "show_transcription_button")
+    hide_transcription_btn = get_text(metadata, "hide_transcription_button")
     
+    # Handle button clicks
     if text == context_btn_text:
         await handle_context_button(client, message)
         return
     elif text == cancel_btn_text:
         await cancel_command(client, message)
+        return
+    elif text == show_original_btn or text == hide_original_btn:
+        await handle_toggle_original_button(client, message)
+        return
+    elif text == show_transcription_btn or text == hide_transcription_btn:
+        await handle_toggle_transcription_button(client, message)
         return
     
     # Handle state-based inputs
@@ -1140,6 +1189,7 @@ async def handle_text_message(client: Client, message: Message) -> None:
         # User is entering context
         update_context(text)
         set_user_state(user_id, None)
+        keyboard = create_keyboard(metadata, user_id)
         await message.reply_text(
             get_text(metadata, "context_set"),
             reply_markup=keyboard
@@ -1275,6 +1325,7 @@ async def handle_text_message(client: Client, message: Message) -> None:
         return
     
     # Unknown text
+    keyboard = create_keyboard(metadata, user_id)
     await message.reply_text(
         get_text(metadata, "unknown_text"),
         reply_markup=keyboard
@@ -1283,11 +1334,11 @@ async def handle_text_message(client: Client, message: Message) -> None:
 
 async def handle_video_message(client: Client, message: Message) -> None:
     """Handle video file uploads - now supports up to 2GB with Pyrogram"""
-    from trns.bot.server import bot_metadata, bot_keyboard
+    from trns.bot.server import bot_metadata, create_keyboard
     
     user_id = message.from_user.id
     metadata = bot_metadata if bot_metadata else load_metadata()
-    keyboard = bot_keyboard
+    keyboard = create_keyboard(metadata, user_id)
     
     # Check authentication
     if not is_user_authenticated(user_id):
@@ -1407,6 +1458,50 @@ async def handle_context_button(client: Client, message: Message) -> None:
     
     set_user_state(user_id, STATE_WAITING_CONTEXT)
     await message.reply_text(get_text(metadata, "enter_context"))
+
+
+async def handle_toggle_original_button(client: Client, message: Message) -> None:
+    """Handle toggle original translation button click"""
+    from trns.bot.server import bot_metadata, create_keyboard
+    
+    user_id = message.from_user.id
+    metadata = bot_metadata if bot_metadata else load_metadata()
+    
+    # Get current setting and toggle it
+    current_setting = get_user_setting(user_id, "show_original_translation", default=True)
+    new_setting = not current_setting
+    set_user_setting(user_id, "show_original_translation", new_setting)
+    
+    # Send confirmation with updated keyboard
+    if new_setting:
+        confirmation = get_text(metadata, "original_translation_enabled")
+    else:
+        confirmation = get_text(metadata, "original_translation_disabled")
+    
+    keyboard = create_keyboard(metadata, user_id)
+    await message.reply_text(confirmation, reply_markup=keyboard)
+
+
+async def handle_toggle_transcription_button(client: Client, message: Message) -> None:
+    """Handle toggle transcription button click"""
+    from trns.bot.server import bot_metadata, create_keyboard
+    
+    user_id = message.from_user.id
+    metadata = bot_metadata if bot_metadata else load_metadata()
+    
+    # Get current setting and toggle it
+    current_setting = get_user_setting(user_id, "show_transcription", default=True)
+    new_setting = not current_setting
+    set_user_setting(user_id, "show_transcription", new_setting)
+    
+    # Send confirmation with updated keyboard
+    if new_setting:
+        confirmation = get_text(metadata, "transcription_enabled")
+    else:
+        confirmation = get_text(metadata, "transcription_disabled")
+    
+    keyboard = create_keyboard(metadata, user_id)
+    await message.reply_text(confirmation, reply_markup=keyboard)
 
 
 async def route_update(client: Client, update: Update):

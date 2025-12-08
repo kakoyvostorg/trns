@@ -2,14 +2,30 @@
 
 TRNS is a powerful tool for transcribing YouTube videos, Twitter/X.com videos, and local video files with automatic translation and language model processing. It provides both a command-line interface and a Telegram bot for easy access.
 
+## Tech Stack
+
+| Component | Technology |
+|-----------|------------|
+| **Telegram Bot** | [Pyrogram](https://pyrogram.org/) (MTProto) — enables large file downloads up to 2GB |
+| **Web Server** | [FastAPI](https://fastapi.tiangolo.com/) + [Uvicorn](https://www.uvicorn.org/) with webhook support |
+| **Speech-to-Text** | [faster-whisper](https://github.com/SYSTRAN/faster-whisper) — high-performance Whisper implementation |
+| **Video Download** | [yt-dlp](https://github.com/yt-dlp/yt-dlp) — supports YouTube, Twitter/X, and 1000+ sites |
+| **Subtitles** | [youtube-transcript-api](https://github.com/jdepoix/youtube-transcript-api) — auto-generated captions extraction |
+| **Translation** | [deep-translator](https://github.com/nidhaloff/deep-translator) — multi-provider translation |
+| **LLM Processing** | [OpenRouter.ai](https://openrouter.ai/) via OpenAI client — intelligent summaries |
+| **Audio Processing** | FFmpeg |
+
 ## Features
 
-- 🎥 **Multi-source support**: YouTube videos, Twitter/X.com videos, and local video files
-- 🗣️ **Speech-to-text**: Uses Whisper for high-quality transcription
+- 🎥 **Multi-source support**: YouTube videos, Twitter/X.com videos, and local video files (up to 2GB via Telegram)
+- 🗣️ **Speech-to-text**: High-performance transcription with faster-whisper
+- 📝 **Smart subtitle fallback**: Uses auto-generated captions when available, falls back to Whisper
 - 🌍 **Automatic translation**: Translates transcriptions to Russian
 - 🤖 **Language model processing**: Processes transcriptions through OpenRouter.ai for intelligent summaries
-- 📱 **Telegram bot**: Interactive bot interface with real-time transcription updates
+- 📱 **Telegram bot**: Interactive bot with real-time transcription updates via Pyrogram MTProto
 - 🖥️ **CLI tool**: Simple command-line interface: `trns <url>`
+- ⚡ **Async processing**: Background task processing with graceful shutdown
+- 🔐 **Authentication**: User whitelist with AUTH_KEY-based onboarding
 
 ## Quick Start
 
@@ -35,21 +51,22 @@ trns /path/to/video.mp4
 ### Telegram Bot Setup
 
 1. Create a Telegram bot via [@BotFather](https://t.me/botfather)
-2. Set environment variables or create config files:
+2. Get API credentials from [my.telegram.org](https://my.telegram.org) (required for Pyrogram MTProto)
+3. Set environment variables or create config files:
    ```bash
    export BOT_TOKEN=your_bot_token
-   export TELEGRAM_API_ID=your_api_id
-   export TELEGRAM_API_HASH=your_api_hash
+   export TELEGRAM_API_ID=your_api_id       # From my.telegram.org
+   export TELEGRAM_API_HASH=your_api_hash   # From my.telegram.org
    export AUTH_KEY=your_auth_key
    export OPENROUTER_API_KEY=your_api_key
    ```
    
-   **Note:** Get `TELEGRAM_API_ID` and `TELEGRAM_API_HASH` from https://my.telegram.org. Users will authenticate with `AUTH_KEY` and be automatically added to `config.json`.
-3. Run the bot:
+   **Note:** `TELEGRAM_API_ID` and `TELEGRAM_API_HASH` are required for Pyrogram's MTProto client, which enables downloading files up to 2GB (vs 20MB with Bot API).
+4. Run the bot:
    ```bash
    python -m trns.bot.server
    ```
-4. Configure webhook (see [SETUP.md](docs/SETUP.md) for details)
+5. Configure webhook (see [SETUP.md](docs/SETUP.md) for details)
 
 ## Configuration
 
@@ -91,6 +108,31 @@ See `config/` directory for example files.
   - Linux: `sudo apt-get install ffmpeg`
   - Windows: Download from [ffmpeg.org](https://ffmpeg.org/download.html)
 
+## Architecture
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                      User Interface                          │
+├───────────────────────┬─────────────────────────────────────┤
+│   CLI Interface       │     Telegram Bot Interface          │
+│   (trns command)      │     (Pyrogram + FastAPI Webhooks)   │
+└───────────┬───────────┴──────────────┬──────────────────────┘
+            │                          │
+            └──────────┬───────────────┘
+                       │
+         ┌─────────────▼─────────────┐
+         │   Transcription Pipeline  │
+         └─────────────┬─────────────┘
+                       │
+    ┌──────────────────┼──────────────────┐
+    │                  │                  │
+┌───▼────────┐  ┌──────▼──────┐  ┌───────▼───────┐
+│   yt-dlp   │  │   faster-   │  │  OpenRouter   │
+│   Audio    │  │   whisper   │  │     LLM       │
+│ Extraction │  │ Transcriber │  │   Processor   │
+└────────────┘  └─────────────┘  └───────────────┘
+```
+
 ## Documentation
 
 - [Setup Guide](docs/SETUP.md) - Detailed setup instructions
@@ -103,7 +145,7 @@ See `config/` directory for example files.
 
 ```bash
 # Clone the repository
-git clone https://github.com/yourusername/trns.git
+git clone https://github.com/kakoyvostorg/trns.git
 cd trns
 
 # Install in development mode
@@ -140,4 +182,3 @@ Contributions are welcome! Please read our contributing guidelines and submit pu
 ## Support
 
 For issues and questions, please open an issue on GitHub.
-

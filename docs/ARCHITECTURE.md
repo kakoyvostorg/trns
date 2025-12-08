@@ -11,7 +11,7 @@ TRNS is a transcription and language model processing system that supports multi
 │                        User Interface                        │
 ├──────────────────────┬──────────────────────────────────────┤
 │   CLI Interface      │      Telegram Bot Interface          │
-│   (trns command)     │      (FastAPI Webhook Server)        │
+│   (trns command)     │   (Pyrogram MTProto + FastAPI)       │
 └──────────┬───────────┴──────────────┬───────────────────────┘
            │                          │
            └──────────┬───────────────┘
@@ -53,7 +53,8 @@ TRNS is a transcription and language model processing system that supports multi
 **Purpose:** Interactive Telegram bot for transcription
 
 **Architecture:**
-- **FastAPI Server** (`trns.bot.server`): Webhook server
+- **Pyrogram MTProto Client** (`trns.bot.server`): Enables large file downloads (up to 2GB vs 20MB Bot API limit)
+- **FastAPI Server** (`trns.bot.server`): Webhook server for receiving updates
 - **Route Handlers** (`trns.bot.routes`): Message and command handlers
 - **Utilities** (`trns.bot.utils`): Authentication, token management, config
 - **Output Handler** (`trns.bot.output_handler`): Real-time message sending
@@ -303,9 +304,11 @@ User sends message
 
 ### Bot
 
-- `python-telegram-bot`: Telegram API
+- `pyrogram`: Telegram MTProto client (supports file downloads up to 2GB)
+- `tgcrypto`: Cryptography for Pyrogram
 - `fastapi`: Webhook server
 - `uvicorn`: ASGI server
+- `aiohttp`: Async HTTP client
 
 ### Utilities
 

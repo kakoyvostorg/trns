@@ -104,6 +104,13 @@ class TranscriptionPipeline:
         # LM interval tracking (controlled by pipeline, not worker thread)
         self.lm_interval = getattr(args, 'lm_interval', 30)
         self.last_lm_call_time = 0.0
+        
+        # User settings for output control
+        self.show_original_translation = getattr(args, 'show_original_translation', True)
+        self.show_transcription = getattr(args, 'show_transcription', True)
+        
+        # Track detected language for bilingual LM mode
+        self.detected_language = "ru"  # Default to Russian
     
     def initialize_components(self):
         """Initialize subtitle extractor, whisper transcriber, and LM processor"""
@@ -172,16 +179,23 @@ class TranscriptionPipeline:
         # Initialize LM processor if LM output mode is enabled
         if hasattr(self.args, 'lm_output_mode') and self.args.lm_output_mode != "transcriptions-only":
             try:
+                # Determine if we should use bilingual mode
+                # Use bilingual if: show_original_translation is ON AND we expect non-Russian content
+                use_bilingual_mode = self.show_original_translation
+                
                 self.lm_processor = LMProcessor(
                     api_key_file=getattr(self.args, 'lm_api_key_file', 'api_key.txt'),
                     prompt_file=getattr(self.args, 'lm_prompt_file', 'prompt.md'),
+                    prompt_original_file=getattr(self.args, 'lm_prompt_original_file', 'prompt_original.md'),
                     model=getattr(self.args, 'lm_model', 'google/gemma-3-27b-it:free'),
                     window_seconds=getattr(self.args, 'lm_window_seconds', 120),
                     interval=self.args.interval,
                     context=getattr(self.args, 'context', ''),
-                    shutdown_flag=self.shutdown_flag
+                    shutdown_flag=self.shutdown_flag,
+                    use_bilingual=use_bilingual_mode,
+                    detected_language=self.detected_language
                 )
-                logger.info("LM processor initialized")
+                logger.info(f"LM processor initialized (bilingual mode: {use_bilingual_mode})")
             except Exception as e:
                 logger.error(f"Failed to initialize LM processor: {e}")
                 logger.warning("Continuing without LM processing")
@@ -505,27 +519,58 @@ class TranscriptionPipeline:
             return False
     
     def _output_transcription(self, timestamp: str, text: str, translated_text: str, language: str, language_prob: float, iteration: Optional[int] = None):
-        """Output transcription based on output mode"""
+        """Output transcription based on output mode and user settings"""
+        # Update detected language for LM processor
+        if language and language != "unknown":
+            self.detected_language = language
+            # Update LM processor's detected language if it exists
+            if self.lm_processor:
+                self.lm_processor.detected_language = language
+                # Reload prompt if language changed and bilingual mode is on
+                if self.lm_processor.use_bilingual:
+                    try:
+                        self.lm_processor._load_prompt()
+                    except Exception as e:
+                        logger.warning(f"Failed to reload prompt after language detection: {e}")
+        
         lm_output_mode = getattr(self.args, 'lm_output_mode', 'both')
+        
+        # Check if we should output transcription
+        if not self.show_transcription:
+            # Transcription output is disabled by user
+            logger.debug(f"Transcription output suppressed by user setting")
+            # Still save to file if requested
+            if self.args.save_transcript:
+                try:
+                    with open(self.args.save_transcript, 'a', encoding='utf-8') as f:
+                        f.write(f"[{timestamp}] {text}\n")
+                        if self.args.translation_output in ["russian-only", "both"]:
+                            f.write(f"[{timestamp}] [RU] {translated_text}\n")
+                except Exception as e:
+                    logger.warning(f"Failed to save transcript: {e}")
+            return
         
         # Determine what to output
         if lm_output_mode == "transcriptions-only" or lm_output_mode == "both":
-            # Output transcription
-            if self.args.translation_output == "russian-only":
-                display_text = translated_text
-            elif self.args.translation_output == "both":
-                display_text = f"[{language}] {text}\n[RU] {translated_text}"
-            else:
-                display_text = text
-            
+            # Output transcription based on user setting and language
+            # If show_original_translation is ON and language is not Russian: show both in separate messages
+            # Otherwise: show Russian only
             iter_str = f" #{iteration}" if iteration else ""
             # In production mode, only log to file; in debug mode, log to stdout
             if self.debug_mode:
                 logger.info(f"🎤 Chunk{iter_str} ({language}, prob={language_prob:.2f}): {text[:50]}...")
             else:
                 logger.debug(f"🎤 Chunk{iter_str} ({language}, prob={language_prob:.2f}): {text[:50]}...")
+            
             # Always print transcription to stdout (this is the main output)
-            print(f"\n{display_text}\n", flush=True)
+            if self.show_original_translation and language != "ru" and language != "unknown":
+                # Print original with language label
+                print(f"\n[{language}] {text}\n", flush=True)
+                # Print Russian translation without label (add hidden marker for immediate send)
+                print(f"\n{translated_text} [.]\n", flush=True)
+            else:
+                # Print Russian only
+                print(f"\n{translated_text}\n", flush=True)
             
             # Save to file if requested
             if self.args.save_transcript:
@@ -537,27 +582,62 @@ class TranscriptionPipeline:
                 except Exception as e:
                     logger.warning(f"Failed to save transcript: {e}")
     
-    def _output_lm_report(self, timestamp: str, report: str):
-        """Output LM report"""
+    def _output_lm_report(self, timestamp: str, report):
+        """
+        Output LM report (handles both string and tuple formats).
+        
+        Args:
+            timestamp: Timestamp string
+            report: Either a string (Russian-only) or tuple (original, russian) for bilingual mode
+        """
         lm_output_mode = getattr(self.args, 'lm_output_mode', 'both')
         
         if lm_output_mode == "lm-only" or lm_output_mode == "both":
-            # In production mode, only log to file; in debug mode, log to stdout
-            if self.debug_mode:
-                logger.info(f"📊 LM Report: {report[:50]}...")
+            # Check if report is bilingual (tuple)
+            if isinstance(report, tuple) and len(report) == 2:
+                original_text, russian_text = report
+                
+                # In production mode, only log to file; in debug mode, log to stdout
+                if self.debug_mode:
+                    logger.info(f"📊 Bilingual LM Report: original={original_text[:50]}..., russian={russian_text[:50]}...")
+                else:
+                    logger.debug(f"📊 Bilingual LM Report generated")
+                
+                # Print LM Report label, then original, then Russian (3 separate messages)
+                # Add hidden markers to trigger immediate sends in Telegram bot
+                print(f"\n[LM Report]\n", flush=True)
+                print(f"\n{original_text} [.]\n", flush=True)
+                print(f"\n{russian_text} [.]\n", flush=True)
+                
+                # Save to file if requested
+                if self.args.save_transcript:
+                    try:
+                        with open(self.args.save_transcript, 'a', encoding='utf-8') as f:
+                            f.write(f"[{timestamp}] [LM Report - Original]\n{original_text}\n")
+                            f.write(f"[{timestamp}] [LM Report - Russian]\n{russian_text}\n")
+                    except Exception as e:
+                        logger.warning(f"Failed to save LM report: {e}")
             else:
-                logger.debug(f"📊 LM Report: {report[:50]}...")
-            # Always print LM report to stdout (this is the main output)
-            # Print LM Report label as separate message, then the report
-            print(f"\nLM Report:\n{report}\n", flush=True)
-            
-            # Save to file if requested
-            if self.args.save_transcript:
-                try:
-                    with open(self.args.save_transcript, 'a', encoding='utf-8') as f:
-                        f.write(f"[{timestamp}] [LM Report]\n{report}\n")
-                except Exception as e:
-                    logger.warning(f"Failed to save LM report: {e}")
+                # Russian-only mode (string)
+                report_str = str(report)
+                
+                # In production mode, only log to file; in debug mode, log to stdout
+                if self.debug_mode:
+                    logger.info(f"📊 LM Report: {report_str[:50]}...")
+                else:
+                    logger.debug(f"📊 LM Report: {report_str[:50]}...")
+                
+                # Always print LM report to stdout (this is the main output)
+                # Print LM Report label as separate message, then the report
+                print(f"\nLM Report:\n{report_str}\n", flush=True)
+                
+                # Save to file if requested
+                if self.args.save_transcript:
+                    try:
+                        with open(self.args.save_transcript, 'a', encoding='utf-8') as f:
+                            f.write(f"[{timestamp}] [LM Report]\n{report_str}\n")
+                    except Exception as e:
+                        logger.warning(f"Failed to save LM report: {e}")
     
     def _process_transcription_results(self):
         """Process completed transcription results from queue"""
@@ -754,13 +834,15 @@ class TranscriptionPipeline:
                                 # Output transcription
                                 lm_output_mode = getattr(self.args, 'lm_output_mode', 'both')
                                 if lm_output_mode == "transcriptions-only" or lm_output_mode == "both":
-                                    if self.args.translation_output == "russian-only":
-                                        display_text = translated_text
-                                    elif self.args.translation_output == "both":
-                                        display_text = f"[{self.args.language}] {text}\n[RU] {translated_text}"
+                                    # Use user setting for showing original
+                                    if self.show_original_translation and self.args.language != "ru":
+                                        # Print original with language label
+                                        print(f"\n[{self.args.language}] {text}\n", flush=True)
+                                        # Print Russian translation without label (add hidden marker for immediate send)
+                                        print(f"\n{translated_text} [.]\n", flush=True)
                                     else:
-                                        display_text = text
-                                    print(f"\n{display_text}\n", flush=True)
+                                        # Print Russian only
+                                        print(f"\n{translated_text}\n", flush=True)
                                 
                                 # Save to file if requested
                                 if self.args.save_transcript:

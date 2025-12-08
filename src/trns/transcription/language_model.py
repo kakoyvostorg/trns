@@ -27,37 +27,47 @@ class LMProcessor:
         self,
         api_key_file: str = "api_key.txt",
         prompt_file: str = "prompt.md",
+        prompt_original_file: str = "prompt_original.md",
         model: str = "google/gemma-3-27b-it:free",
         window_seconds: int = 120,
         interval: int = 30,
         context: str = "",
-        shutdown_flag: Optional[Callable[[], bool]] = None
+        shutdown_flag: Optional[Callable[[], bool]] = None,
+        use_bilingual: bool = False,
+        detected_language: str = "ru"
     ):
         """
         Initialize LM processor.
         
         Args:
             api_key_file: Path to file containing OpenRouter.ai API key
-            prompt_file: Path to file containing the prompt
+            prompt_file: Path to file containing the Russian prompt
+            prompt_original_file: Path to file containing the original language prompt template
             model: OpenRouter.ai model name
             window_seconds: Window size n for LM processing (default: 120)
             interval: Interval between transcriptions in seconds (default: 30)
             context: Additional context to add to prompt (default: empty string)
             shutdown_flag: Optional callable to check for shutdown signal
+            use_bilingual: Whether to process both original and Russian (default: False)
+            detected_language: Detected language code (default: "ru")
         """
         self.api_key_file = api_key_file
         self.prompt_file = prompt_file
+        self.prompt_original_file = prompt_original_file
         self.model = model
         self.window_seconds = window_seconds
         self.interval = interval
         self.context = context
         self.shutdown_flag = shutdown_flag
+        self.use_bilingual = use_bilingual
+        self.detected_language = detected_language
         
         # Initialize OpenAI client
         self.client = None
-        self.prompt = None
+        self.prompt_russian = None
+        self.prompt_original_template = None
         self._initialize_client()
-        self._load_prompt()
+        self._load_prompts()
     
     def _check_shutdown(self) -> bool:
         """Check if shutdown was requested"""
@@ -121,23 +131,36 @@ class LMProcessor:
             logger.error(f"Error initializing OpenAI client: {e}")
             raise
     
-    def _load_prompt(self):
-        """Load prompt from file and add context if provided"""
+    def _load_prompts(self):
+        """Load prompt files"""
         try:
+            # Load Russian prompt
             with open(self.prompt_file, "r", encoding="utf-8") as f:
-                self.prompt = f.read()
+                self.prompt_russian = f.read()
             
-            # Add context if provided
+            # Add context to Russian prompt if provided
             if self.context and self.context.strip():
-                self.prompt += f"\nДополнительный контекст: {self.context}"
-                logger.info(f"Prompt loaded from {self.prompt_file} with additional context")
+                self.prompt_russian += f"\nДополнительный контекст: {self.context}"
+                logger.info(f"Russian prompt loaded from {self.prompt_file} with additional context")
             else:
-                logger.info(f"Prompt loaded from {self.prompt_file}")
-        except FileNotFoundError:
-            logger.error(f"Prompt file not found: {self.prompt_file}")
+                logger.info(f"Russian prompt loaded from {self.prompt_file}")
+            
+            # Load original language prompt template
+            with open(self.prompt_original_file, "r", encoding="utf-8") as f:
+                self.prompt_original_template = f.read()
+            
+            # Add context to original template if provided
+            if self.context and self.context.strip():
+                self.prompt_original_template += f"\nAdditional context: {self.context}"
+                logger.info(f"Original language prompt template loaded from {self.prompt_original_file} with additional context")
+            else:
+                logger.info(f"Original language prompt template loaded from {self.prompt_original_file}")
+                
+        except FileNotFoundError as e:
+            logger.error(f"Prompt file not found: {e}")
             raise
         except Exception as e:
-            logger.error(f"Error loading prompt: {e}")
+            logger.error(f"Error loading prompts: {e}")
             raise
     
     def _calculate_window_size(self) -> int:
@@ -203,34 +226,62 @@ class LMProcessor:
             # Token management not available, return None to use existing client
             return None
     
-    def process_transcription_window(self, all_transcriptions: List[Dict]) -> Optional[str]:
+    def _get_language_name(self, language_code: str) -> str:
+        """Convert language code to full name for prompt substitution"""
+        language_names = {
+            'en': 'English',
+            'es': 'Spanish',
+            'fr': 'French',
+            'de': 'German',
+            'it': 'Italian',
+            'pt': 'Portuguese',
+            'zh': 'Chinese',
+            'ja': 'Japanese',
+            'ko': 'Korean',
+            'ar': 'Arabic',
+            'ru': 'Russian',
+            'uk': 'Ukrainian',
+            'pl': 'Polish',
+            'tr': 'Turkish',
+            'nl': 'Dutch',
+            'sv': 'Swedish',
+            'da': 'Danish',
+            'no': 'Norwegian',
+            'fi': 'Finnish',
+        }
+        return language_names.get(language_code, language_code.upper())
+    
+    def process_original_language(self, text: str, language_code: str) -> Optional[str]:
         """
-        Process a window of transcriptions through the language model.
+        Process text in its original language through LM.
         
         Args:
-            all_transcriptions: List of transcription dicts with 'translated' key
+            text: Original language text to process
+            language_code: Language code (e.g., 'en', 'fr', 'es')
         
         Returns:
-            LM-generated report text, or None if processing failed
+            Processed text in original language, or None if failed
         """
-        if self.client is None or self.prompt is None:
-            logger.error("LM client or prompt not initialized")
+        if self.client is None or self.prompt_original_template is None:
+            logger.error("LM client or original prompt template not initialized")
             return None
         
-        # Get window text
-        window_text = self._get_window_text(all_transcriptions)
-        
-        if not window_text.strip():
-            logger.debug("No text in window to process")
+        if not text.strip():
+            logger.debug("No text to process in original language")
             return None
+        
+        # Get language name for prompt substitution
+        language_name = self._get_language_name(language_code)
+        
+        # Replace {LANGUAGE} placeholder with actual language
+        prompt = self.prompt_original_template.replace('{LANGUAGE}', language_name)
         
         max_retries = 3
         for attempt in range(max_retries):
             try:
-                # Combine prompt and text
-                content = self.prompt + "\n\n" + window_text
+                content = prompt + "\n\n" + text
                 
-                logger.info(f"Processing {len(all_transcriptions)} transcriptions through LM (window: {self._calculate_window_size()})...")
+                logger.info(f"Processing original language ({language_name}) through LM...")
                 
                 # Update token before API call (decrement capacity)
                 token = self._get_token_and_decrement()
@@ -249,28 +300,48 @@ class LMProcessor:
                         pass
                 
                 # Call LM API
+                messages = [
+                    {
+                        "role": "system",
+                        "content": f"You are a text editor. Process the text in {language_name}. DO NOT translate to any other language!"
+                    },
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": content
+                            }
+                        ]
+                    }
+                ]
+                
                 completion = self.client.chat.completions.create(
                     model=self.model,
-                    messages=[
-                        {
-                            "role": "user",
-                            "content": [
-                                {
-                                    "type": "text",
-                                    "text": content
-                                }
-                            ]
-                        }
-                    ],
+                    messages=messages,
                 )
                 
-                report = completion.choices[0].message.content.strip('\n')
+                # Safely extract response
+                if not completion or not hasattr(completion, 'choices') or not completion.choices:
+                    logger.error(f"LM API returned empty completion or no choices")
+                    return None
+                
+                if not completion.choices[0].message:
+                    logger.error("LM API returned no message in choice")
+                    return None
+                
+                report_content = completion.choices[0].message.content
+                if report_content is None:
+                    logger.error("LM API returned None for message content")
+                    return None
+                
+                report = report_content.strip('\n')
                 
                 if report:
-                    logger.info("LM report generated successfully")
+                    logger.info(f"Original language report generated successfully ({len(report)} chars)")
                     return report
                 else:
-                    logger.warning("LM returned empty report")
+                    logger.warning("LM returned empty report for original language")
                     return None
                     
             except Exception as e:
@@ -288,12 +359,172 @@ class LMProcessor:
                         raise
                 else:
                     # Other error
-                    logger.error(f"Error processing transcription window through LM: {e}")
+                    logger.error(f"Error processing original language through LM: {e}")
                     import traceback
                     logger.debug(traceback.format_exc())
                     return None
         
         return None
+    
+    def process_russian_translation(self, text: str) -> Optional[str]:
+        """
+        Process Russian translation through LM.
+        
+        Args:
+            text: Russian text to process
+        
+        Returns:
+            Processed Russian text, or None if failed
+        """
+        if self.client is None or self.prompt_russian is None:
+            logger.error("LM client or Russian prompt not initialized")
+            return None
+        
+        if not text.strip():
+            logger.debug("No Russian text to process")
+            return None
+        
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                content = self.prompt_russian + "\n\n" + text
+                
+                logger.info(f"Processing Russian translation through LM...")
+                
+                # Update token before API call (decrement capacity)
+                token = self._get_token_and_decrement()
+                if token is None and attempt == 0:
+                    # Try to reinitialize client if token management failed
+                    try:
+                        from trns.bot.utils import get_current_token
+                        token = get_current_token(self.api_key_file, "metadata.json")
+                        if token:
+                            from openai import OpenAI
+                            self.client = OpenAI(
+                                base_url="https://openrouter.ai/api/v1",
+                                api_key=token,
+                            )
+                    except:
+                        pass
+                
+                # Call LM API
+                messages = [
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": content
+                            }
+                        ]
+                    }
+                ]
+                
+                completion = self.client.chat.completions.create(
+                    model=self.model,
+                    messages=messages,
+                )
+                
+                # Safely extract response
+                if not completion or not hasattr(completion, 'choices') or not completion.choices:
+                    logger.error(f"LM API returned empty completion or no choices")
+                    return None
+                
+                if not completion.choices[0].message:
+                    logger.error("LM API returned no message in choice")
+                    return None
+                
+                report_content = completion.choices[0].message.content
+                if report_content is None:
+                    logger.error("LM API returned None for message content")
+                    return None
+                
+                report = report_content.strip('\n')
+                
+                if report:
+                    logger.info(f"Russian report generated successfully ({len(report)} chars)")
+                    return report
+                else:
+                    logger.warning("LM returned empty report for Russian")
+                    return None
+                    
+            except Exception as e:
+                error_str = str(e).lower()
+                
+                # Check for 429 error (rate limit)
+                if "429" in error_str or "too many requests" in error_str:
+                    logger.warning("Received 429 error (rate limit). Retrying with backoff...")
+                    if attempt < max_retries - 1:
+                        import time
+                        time.sleep(2 ** attempt)  # Exponential backoff
+                        continue
+                    else:
+                        logger.error("Max retries reached for 429 error")
+                        raise
+                else:
+                    # Other error
+                    logger.error(f"Error processing Russian through LM: {e}")
+                    import traceback
+                    logger.debug(traceback.format_exc())
+                    return None
+        
+        return None
+    
+    def process_transcription_window(self, all_transcriptions: List[Dict]):
+        """
+        Process a window of transcriptions through the language model.
+        Makes two separate API calls if bilingual mode is active:
+        1. Process original language text
+        2. Process Russian translation
+        
+        Args:
+            all_transcriptions: List of transcription dicts with 'text' and 'translated' keys
+        
+        Returns:
+            If bilingual mode and non-Russian: tuple of (original_text, russian_text)
+            Otherwise: russian_text (string) or None if processing failed
+        """
+        if self.client is None:
+            logger.error("LM client not initialized")
+            return None
+        
+        # Get window text (Russian translation)
+        russian_text = self._get_window_text(all_transcriptions)
+        
+        if not russian_text.strip():
+            logger.debug("No text in window to process")
+            return None
+        
+        logger.info(f"Processing {len(all_transcriptions)} transcriptions through LM (window: {self._calculate_window_size()})...")
+        
+        # Decide whether to make one or two API calls
+        if self.use_bilingual and self.detected_language != "ru":
+            # Two API calls: original language first, then Russian
+            logger.info(f"Bilingual mode: processing in {self.detected_language} and Russian")
+            
+            # Get original language text from transcriptions
+            original_text = "\n".join([t.get('text', '') for t in all_transcriptions[-self._calculate_window_size():]])
+            
+            # Process original language
+            original_output = self.process_original_language(original_text, self.detected_language)
+            
+            # Process Russian translation
+            russian_output = self.process_russian_translation(russian_text)
+            
+            if original_output and russian_output:
+                logger.info(f"Successfully processed both versions - original: {len(original_output)} chars, russian: {len(russian_output)} chars")
+                return (original_output, russian_output)
+            elif russian_output:
+                # If original failed but Russian succeeded, return Russian only
+                logger.warning("Original language processing failed, returning Russian only")
+                return russian_output
+            else:
+                logger.error("Both original and Russian processing failed")
+                return None
+        else:
+            # One API call: Russian only
+            logger.info(f"Russian-only mode (use_bilingual={self.use_bilingual}, detected_language={self.detected_language})")
+            return self.process_russian_translation(russian_text)
     
     def worker(
         self,

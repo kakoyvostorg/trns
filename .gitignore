@@ -50,6 +50,7 @@ key.txt
 
 
 config.json
+user_settings.json
 
 # Logs and temporary files
 logs.txt

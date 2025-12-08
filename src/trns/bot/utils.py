@@ -392,3 +392,110 @@ def check_token_warning(metadata_path: str = "metadata.json") -> bool:
     capacity = get_daily_capacity(metadata_path)
     return capacity < WARNING_THRESHOLD
 
+
+def load_user_settings(settings_path: str = "user_settings.json") -> Dict:
+    """
+    Load user settings from JSON file.
+    Creates file with empty dict if it doesn't exist.
+    
+    Returns:
+        Dictionary mapping user_id (as string) to settings dict
+    """
+    if not os.path.exists(settings_path):
+        logger.info(f"User settings file not found, creating: {settings_path}")
+        save_user_settings({}, settings_path)
+        return {}
+    
+    try:
+        with open(settings_path, 'r', encoding='utf-8') as f:
+            settings = json.load(f)
+            # Convert string keys to int for user_id access
+            return {int(k) if k.isdigit() else k: v for k, v in settings.items()}
+    except FileNotFoundError:
+        return {}
+    except json.JSONDecodeError as e:
+        logger.error(f"Error parsing user_settings.json: {e}")
+        return {}
+    except Exception as e:
+        logger.error(f"Error loading user settings: {e}")
+        return {}
+
+
+def save_user_settings(settings: Dict, settings_path: str = "user_settings.json"):
+    """
+    Save user settings to JSON file.
+    
+    Args:
+        settings: Dictionary mapping user_id to settings dict
+        settings_path: Path to settings file
+    """
+    try:
+        # Convert int keys to string for JSON serialization
+        settings_for_json = {str(k): v for k, v in settings.items()}
+        
+        with open(settings_path, 'w', encoding='utf-8') as f:
+            json.dump(settings_for_json, f, indent=2, ensure_ascii=False)
+    except Exception as e:
+        logger.error(f"Error saving user settings: {e}")
+        raise
+
+
+def get_user_setting(user_id: int, setting_key: str, default=None, settings_path: str = "user_settings.json"):
+    """
+    Get a specific setting for a user.
+    
+    Args:
+        user_id: Telegram user ID
+        setting_key: Setting key to retrieve
+        default: Default value if setting not found
+        settings_path: Path to settings file
+    
+    Returns:
+        Setting value or default
+    """
+    settings = load_user_settings(settings_path)
+    
+    if user_id not in settings:
+        return default
+    
+    return settings[user_id].get(setting_key, default)
+
+
+def set_user_setting(user_id: int, setting_key: str, value, settings_path: str = "user_settings.json"):
+    """
+    Set a specific setting for a user.
+    
+    Args:
+        user_id: Telegram user ID
+        setting_key: Setting key to set
+        value: Value to set
+        settings_path: Path to settings file
+    """
+    settings = load_user_settings(settings_path)
+    
+    if user_id not in settings:
+        settings[user_id] = {}
+    
+    settings[user_id][setting_key] = value
+    save_user_settings(settings, settings_path)
+
+
+def initialize_user_settings(user_id: int, settings_path: str = "user_settings.json"):
+    """
+    Initialize default settings for a new user.
+    Default: show_original_translation=True, show_transcription=True
+    
+    Args:
+        user_id: Telegram user ID
+        settings_path: Path to settings file
+    """
+    settings = load_user_settings(settings_path)
+    
+    if user_id not in settings:
+        settings[user_id] = {
+            "show_original_translation": True,
+            "show_transcription": True
+        }
+        save_user_settings(settings, settings_path)
+        logger.info(f"Initialized default settings for user {user_id}")
+

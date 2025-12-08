@@ -78,6 +78,7 @@ def create_default_config(config_path: str = "config.json"):
         "lm_output_mode": "both",
         "lm_api_key_file": "api_key.txt",
         "lm_prompt_file": "prompt.md",
+        "lm_prompt_original_file": "prompt_original.md",
         "lm_model": "google/gemma-3-27b-it:free",
         "debug": False,
         "context": ""
@@ -127,6 +128,7 @@ def apply_config_to_args(args, config):
         "lm_output_mode": "lm_output_mode",
         "lm_api_key_file": "lm_api_key_file",
         "lm_prompt_file": "lm_prompt_file",
+        "lm_prompt_original_file": "lm_prompt_original_file",
         "lm_model": "lm_model",
         "debug": "debug",
         "context": "context"
@@ -278,6 +280,12 @@ Examples:
         type=str,
         default="prompt.md",
         help="Path to file containing the prompt for LM (default: prompt.md)"
+    )
+    parser.add_argument(
+        "--lm-prompt-original-file",
+        type=str,
+        default="prompt_original.md",
+        help="Path to file containing the original language prompt template for LM (default: prompt_original.md)"
     )
     parser.add_argument(
         "--lm-model",
