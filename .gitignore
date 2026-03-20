@@ -78,3 +78,6 @@ __pycache__/
 *.pyc
 *.pyo
 
+
+# Claude agent settings
+.claude/

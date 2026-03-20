@@ -8,7 +8,7 @@ This script extracts text from a YouTube live stream in real time using:
 3. Language model processing for generating reports from transcriptions
 
 Usage:
-    python -m youtube_live_transcription <youtube_url> [--method METHOD] [--interval SECONDS]
+    trns <youtube_url> [--method METHOD] [--interval SECONDS]
     
     Methods:
         - auto (default): Try subtitles first, fallback to Whisper
@@ -16,7 +16,7 @@ Usage:
         - whisper: Only use Whisper
     
     Example:
-        python -m youtube_live_transcription "https://www.youtube.com/watch?v=VIDEO_ID" --interval 30
+        trns "https://www.youtube.com/watch?v=VIDEO_ID" --interval 30
 
 Dependencies:
     pip install -r requirements.txt
@@ -177,19 +177,19 @@ def main():
         epilog="""
 Examples:
   # Auto-detect method (subtitles first, then Whisper)
-  python -m youtube_live_transcription "https://www.youtube.com/watch?v=VIDEO_ID"
+  trns "https://www.youtube.com/watch?v=VIDEO_ID"
   
   # Use only subtitles
-  python -m youtube_live_transcription "https://www.youtube.com/watch?v=VIDEO_ID" --method subtitles
+  trns "https://www.youtube.com/watch?v=VIDEO_ID" --method subtitles
   
   # Use only Whisper
-  python -m youtube_live_transcription "https://www.youtube.com/watch?v=VIDEO_ID" --method whisper
+  trns "https://www.youtube.com/watch?v=VIDEO_ID" --method whisper
   
   # Custom interval
-  python -m youtube_live_transcription "https://www.youtube.com/watch?v=VIDEO_ID" --interval 60
+  trns "https://www.youtube.com/watch?v=VIDEO_ID" --interval 60
   
   # With LM processing (default: both transcriptions and reports)
-  python -m youtube_live_transcription "https://www.youtube.com/watch?v=VIDEO_ID" --lm-output-mode both
+  trns "https://www.youtube.com/watch?v=VIDEO_ID" --lm-output-mode both
         """
     )
     
