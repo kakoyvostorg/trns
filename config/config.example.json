@@ -3,7 +3,7 @@
   "method": "auto",
   "interval": 30,
   "language": "en",
-  "whisper_model": "tiny",
+  "whisper_model": "medium",
   "use_faster_whisper": true,
   "translation_output": "russian-only",
   "save_transcript": null,

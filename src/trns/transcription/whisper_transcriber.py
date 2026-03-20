@@ -52,6 +52,25 @@ class WhisperTranscriber:
             return self.shutdown_flag()
         return bool(self.shutdown_flag)
     
+    @staticmethod
+    def _cleanup_temp_files(base_path: str):
+        """Remove any temp audio files matching the base path (all extensions)."""
+        try:
+            import glob
+            for f in glob.glob(base_path + ".*"):
+                try:
+                    os.remove(f)
+                except OSError:
+                    pass
+            # Also try the base path itself
+            if os.path.exists(base_path):
+                try:
+                    os.remove(base_path)
+                except OSError:
+                    pass
+        except Exception:
+            pass
+
     def _initialize_model(self):
         """Initialize the Whisper models (tiny for language detection, tiny/small for transcription)"""
         try:
@@ -179,14 +198,8 @@ class WhisperTranscriber:
                 'Accept-Encoding': 'gzip, deflate',
                 'Connection': 'keep-alive',
             },
-            # Additional options to handle YouTube restrictions
-            'extractor_args': {
-                'youtube': {
-                    'player_client': 'android',  # Use android client (more reliable for live streams)
-                }
-            },
         }
-        
+
         try:
             with yt_dlp.YoutubeDL(ydl_opts_info) as ydl:
                 logger.info("Extracting video info...")
@@ -278,17 +291,13 @@ class WhisperTranscriber:
                     'Accept-Encoding': 'gzip, deflate',
                     'Connection': 'keep-alive',
                 },
-                'extractor_args': {
-                    'youtube': {
-                        'player_client': 'android',  # Use android client (more reliable)
-                    }
-                },
             }
-            
+
             try:
                 # Check shutdown flag before download
                 if self._check_shutdown():
                     logger.debug("Shutdown requested before audio download")
+                    self._cleanup_temp_files(base_audio_path)
                     return None
                 
                 logger.info(f"Downloading audio chunk from {start_time}s for {duration}s (video_id: {video_id})")
@@ -311,6 +320,7 @@ class WhisperTranscriber:
                     # Check shutdown flag after download
                     if self._check_shutdown():
                         logger.debug("Shutdown requested after audio download")
+                        self._cleanup_temp_files(base_audio_path)
                         return None
                     
                     # Find the actual audio file with retry logic
@@ -324,6 +334,7 @@ class WhisperTranscriber:
                         # Check shutdown flag
                         if self._check_shutdown():
                             logger.debug("Shutdown requested during audio file search")
+                            self._cleanup_temp_files(base_audio_path)
                             return None
                         
                         # List all files in temp directory that match our pattern
@@ -475,12 +486,6 @@ class WhisperTranscriber:
                         'Accept-Encoding': 'gzip, deflate',
                         'Connection': 'keep-alive',
                     },
-                    # Additional options to handle YouTube restrictions
-                    'extractor_args': {
-                        'youtube': {
-                            'player_client': 'android',  # Use android client (more reliable for live streams)
-                        }
-                    },
                 }
                 
                 try:
@@ -517,6 +522,7 @@ class WhisperTranscriber:
                                 raise download_error[0]
                         else:
                             logger.warning(f"Download timeout after {timeout_seconds}s")
+                            self._cleanup_temp_files(audio_path.replace('.wav', ''))
                             return None
                         
                         # Find the actual audio file
@@ -563,12 +569,6 @@ class WhisperTranscriber:
                         'Accept-Language': 'en-us,en;q=0.5',
                         'Accept-Encoding': 'gzip, deflate',
                         'Connection': 'keep-alive',
-                    },
-                    # Additional options to handle YouTube restrictions
-                    'extractor_args': {
-                        'youtube': {
-                            'player_client': 'android',  # Use android client (more reliable)
-                        }
                     },
                 }
                 

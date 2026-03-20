@@ -359,15 +359,15 @@ def decrement_daily_capacity(metadata_path: str = "metadata.json") -> bool:
         
         if capacity <= 0:
             return False
-        
+
         # Decrement capacity
         capacity -= 1
         metadata["daily_capacity"] = capacity
-        
+
         # Update metadata
         save_metadata(metadata, metadata_path)
-        
-        return capacity > 0
+
+        return capacity >= 0
 
 
 def check_capacity_at_start(metadata_path: str = "metadata.json") -> Tuple[int, bool]:

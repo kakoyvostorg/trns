@@ -124,6 +124,73 @@ def create_keyboard(metadata: dict, user_id: Optional[int] = None) -> ReplyKeybo
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
 
 
+class _ChatInfo:
+    """Minimal chat info wrapper."""
+    __slots__ = ('id',)
+    def __init__(self, chat_id): self.id = chat_id
+
+class _UserInfo:
+    """Minimal user info wrapper."""
+    __slots__ = ('id', 'is_bot', 'first_name', 'username')
+    def __init__(self, data):
+        self.id = data.get("id")
+        self.is_bot = data.get("is_bot", False)
+        self.first_name = data.get("first_name", "")
+        self.username = data.get("username")
+
+class _FileInfo:
+    """Minimal file (video/document) info wrapper."""
+    __slots__ = ('file_id', 'file_unique_id', 'file_size', 'file_name', 'mime_type')
+    def __init__(self, data):
+        self.file_id = data.get("file_id")
+        self.file_unique_id = data.get("file_unique_id")
+        self.file_size = data.get("file_size")
+        self.file_name = data.get("file_name")
+        self.mime_type = data.get("mime_type")
+
+class BotAPIMessage:
+    """Lightweight wrapper for Bot API messages to work with our handlers."""
+    def __init__(self, client, data):
+        self._client = client
+        self._data = data
+        self.message_id = data.get("message_id")
+        self.date = data.get("date")
+        self.chat = _ChatInfo(data.get("chat", {}).get("id"))
+        self.text = data.get("text")
+        self.caption = data.get("caption")
+        self.from_user = _UserInfo(data.get("from", {}))
+        self.video = _FileInfo(data["video"]) if "video" in data else None
+        self.document = _FileInfo(data["document"]) if "document" in data else None
+
+    async def reply_text(self, text, reply_markup=None):
+        return await self._client.send_message(
+            chat_id=self.chat.id, text=text, reply_markup=reply_markup
+        )
+
+    async def download(self, file_name=None):
+        file_id = None
+        default_ext = '.mp4'
+        if self.video:
+            file_id = self.video.file_id
+            if self.video.file_name:
+                default_ext = os.path.splitext(self.video.file_name)[1] or '.mp4'
+        elif self.document:
+            file_id = self.document.file_id
+            if self.document.file_name:
+                default_ext = os.path.splitext(self.document.file_name)[1] or '.bin'
+        if not file_id:
+            return None
+        if not file_name:
+            import tempfile
+            file_name = os.path.join(tempfile.gettempdir(), f"download_{file_id}{default_ext}")
+        return await self._client.download_media(message=file_id, file_name=file_name)
+
+class SimpleUpdate:
+    """Minimal update wrapper."""
+    __slots__ = ('message',)
+    def __init__(self, msg): self.message = msg
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Lifespan context manager for FastAPI app"""
@@ -245,104 +312,8 @@ async def webhook(request: Request):
             logger.debug("Received update without message, ignoring")
             return Response(status_code=200)
         
-        # Create a simple message wrapper for Bot API data
-        # This mimics Pyrogram's Message structure for our handlers
         msg_data = update_data["message"]
-        
-        class BotAPIMessage:
-            """Lightweight wrapper for Bot API messages to work with our handlers"""
-            def __init__(self, client, data):
-                self._client = client
-                self._data = data
-                self.message_id = data.get("message_id")
-                self.date = data.get("date")
-                self.chat = type('obj', (object,), {'id': data.get("chat", {}).get("id")})()
-                self.text = data.get("text")
-                self.caption = data.get("caption")
-                
-                # User info
-                from_data = data.get("from", {})
-                self.from_user = type('obj', (object,), {
-                    'id': from_data.get("id"),
-                    'is_bot': from_data.get("is_bot", False),
-                    'first_name': from_data.get("first_name", ""),
-                    'username': from_data.get("username")
-                })()
-                
-                # Video/document info
-                self.video = None
-                self.document = None
-                
-                if "video" in data:
-                    vid_data = data["video"]
-                    self.video = type('obj', (object,), {
-                        'file_id': vid_data.get("file_id"),
-                        'file_unique_id': vid_data.get("file_unique_id"),
-                        'file_size': vid_data.get("file_size"),
-                        'file_name': vid_data.get("file_name"),
-                        'mime_type': vid_data.get("mime_type")
-                    })()
-                
-                if "document" in data:
-                    doc_data = data["document"]
-                    self.document = type('obj', (object,), {
-                        'file_id': doc_data.get("file_id"),
-                        'file_unique_id': doc_data.get("file_unique_id"),
-                        'file_size': doc_data.get("file_size"),
-                        'file_name': doc_data.get("file_name"),
-                        'mime_type': doc_data.get("mime_type")
-                    })()
-            
-            async def reply_text(self, text, reply_markup=None):
-                """Reply to this message"""
-                return await self._client.send_message(
-                    chat_id=self.chat.id,
-                    text=text,
-                    reply_markup=reply_markup
-                )
-            
-            async def download(self, file_name=None):
-                """Download file (video/document) - supports up to 2GB via MTProto"""
-                file_id = None
-                default_ext = '.mp4'
-                
-                if self.video:
-                    file_id = self.video.file_id
-                    if self.video.file_name:
-                        import os
-                        default_ext = os.path.splitext(self.video.file_name)[1] or '.mp4'
-                elif self.document:
-                    file_id = self.document.file_id
-                    if self.document.file_name:
-                        import os
-                        default_ext = os.path.splitext(self.document.file_name)[1] or '.bin'
-                
-                if not file_id:
-                    return None
-                
-                # Generate file name if not provided
-                if not file_name:
-                    import tempfile
-                    import os
-                    file_name = os.path.join(tempfile.gettempdir(), f"download_{file_id}{default_ext}")
-                
-                # Use Pyrogram's download_media which uses MTProto (supports up to 2GB)
-                # Pyrogram can download using file_id directly
-                downloaded_path = await self._client.download_media(
-                    message=file_id,
-                    file_name=file_name
-                )
-                
-                return downloaded_path
-        
-        # Create message wrapper
         message = BotAPIMessage(bot_client, msg_data)
-        
-        # Create simple update object
-        class SimpleUpdate:
-            def __init__(self, msg):
-                self.message = msg
-        
         update = SimpleUpdate(message)
         
         # Route to handlers

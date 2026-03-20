@@ -2,45 +2,27 @@
 
 All notable changes to TRNS will be documented in this file.
 
-The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
-and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+Format: [Keep a Changelog](https://keepachangelog.com/en/1.0.0/). Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.1.0] - 2025-01-XX
-
-### Added
-- Initial release of TRNS
-- CLI interface: `trns <url>` command
-- Telegram bot with FastAPI webhook support
-- Support for YouTube, Twitter/X.com, and local video files
-- Automatic subtitle extraction
-- Whisper-based speech-to-text transcription
-- Automatic translation to Russian
-- Language model processing via OpenRouter.ai
-- Daily capacity tracking (1000 requests/day)
-- Real-time transcription updates via Telegram
-- Environment variable support for configuration
-- Docker support for deployment
-- Comprehensive documentation (English and Russian)
-- Architecture documentation
-- User guide for Telegram bot (Russian)
-
-### Changed
-- Project renamed from V2R to TRNS
-- Restructured codebase into proper Python package (`src/trns/`)
-- Migrated from polling to webhook-based Telegram bot
-- Improved error handling and logging
-- Enhanced token management system
-
-### Removed
-- Old polling-based Telegram bot (`telegram_bot.py`)
-- Old handlers file (`telegram_bot_handlers.py`)
-- Token rotation functionality (replaced with daily capacity)
+## [Unreleased]
 
 ### Fixed
-- Audio extraction errors in Telegram bot
-- Output delivery issues (now sends on completion, not just cancel)
-- Graceful shutdown handling
-- Import path issues
+- **Thread-safety**: replaced `builtins.print` monkey-patching with per-pipeline `output_callback` — concurrent Telegram users no longer cross-contaminate output
+- **Overlap removal**: translated text was sliced by original-language character count, corrupting output. Now uses independent word-matching for each language
+- **Off-by-one in capacity tracking**: last daily request was consumed but reported as failed (`capacity > 0` → `capacity >= 0`)
+- **Token staleness**: after key rotation, LM client kept using old API key. Now detects change and reinitializes
+- **`_load_prompt()` typo**: called non-existent method after language detection (`_load_prompt` → `_load_prompts`)
+- **Missing user settings for YouTube**: `show_original_translation` preference was only loaded for Twitter, not YouTube
+- **Temp file leak on shutdown**: audio extraction temp files left on disk when shutdown triggered mid-process
+- **Bot file path resolution**: relative paths like `api_key.txt` now resolve against `TRNS_HOME`/CWD consistently
+
+### Changed
+- Extracted `_run_pipeline_with_output()` and `_process_url_video()` — eliminated ~400 lines of duplication in `routes.py`
+- Moved inline `type('obj', ...)` hacks to proper module-level classes in `server.py`
+- Added thread-safe locking for `user_states` dict
+- Centralized token refresh logic in `_get_token_and_decrement()`
+- Rewrote README with complete configuration reference table
+- Updated documentation
 
 ## [0.1.1] - 2025-11-17
 
@@ -49,12 +31,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Fixed PyPI publishing workflow to support manual publishing
 - Removed deprecated license classifier
 
-## [Unreleased]
+## [0.1.0] - 2025-01-15
 
-### Planned
-- Database integration for persistent state
-- Redis caching support
-- Multi-language metadata support
-- Admin web interface
-- Analytics and usage statistics
+### Added
+- Initial release of TRNS
+- CLI interface: `trns <url>` command
+- Telegram bot with FastAPI webhook support
+- Support for YouTube, Twitter/X.com, and local video files
+- Automatic subtitle extraction + Whisper speech-to-text
+- Automatic translation to Russian
+- Language model processing via OpenRouter.ai
+- Daily capacity tracking (1000 requests/day)
+- Docker support
+- Documentation (English and Russian)
 
+### Changed
+- Project renamed from V2R to TRNS
+- Restructured into proper Python package (`src/trns/`)
+- Migrated from polling to webhook-based Telegram bot

@@ -34,11 +34,12 @@ class LMProcessor:
         context: str = "",
         shutdown_flag: Optional[Callable[[], bool]] = None,
         use_bilingual: bool = False,
-        detected_language: str = "ru"
+        detected_language: str = "ru",
+        metadata_path: str = "metadata.json"
     ):
         """
         Initialize LM processor.
-        
+
         Args:
             api_key_file: Path to file containing OpenRouter.ai API key
             prompt_file: Path to file containing the Russian prompt
@@ -50,10 +51,12 @@ class LMProcessor:
             shutdown_flag: Optional callable to check for shutdown signal
             use_bilingual: Whether to process both original and Russian (default: False)
             detected_language: Detected language code (default: "ru")
+            metadata_path: Path to metadata.json for token management
         """
         self.api_key_file = api_key_file
         self.prompt_file = prompt_file
         self.prompt_original_file = prompt_original_file
+        self.metadata_path = metadata_path
         self.model = model
         self.window_seconds = window_seconds
         self.interval = interval
@@ -98,11 +101,11 @@ class LMProcessor:
             
             if use_token_management:
                 # Use token management system
-                api_key = get_current_token(self.api_key_file, "metadata.json")
+                api_key = get_current_token(self.api_key_file, self.metadata_path)
                 if api_key is None:
                     # Try to load metadata for error message
                     try:
-                        metadata = load_metadata("metadata.json")
+                        metadata = load_metadata(self.metadata_path)
                         error_msg = get_text(metadata, "no_tokens_available")
                         logger.error(error_msg)
                     except:
@@ -193,7 +196,7 @@ class LMProcessor:
         return " ".join(texts)
     
     def _get_token_and_decrement(self):
-        """Get current token and decrement daily capacity"""
+        """Get current token, refresh client if token changed, and decrement daily capacity."""
         try:
             from trns.bot.utils import (
                 get_current_token,
@@ -201,29 +204,32 @@ class LMProcessor:
                 load_metadata,
                 get_text
             )
-            
-            # Get current token
-            token = get_current_token(self.api_key_file, "metadata.json")
+
+            token = get_current_token(self.api_key_file, self.metadata_path)
             if token is None:
                 try:
-                    metadata = load_metadata("metadata.json")
+                    metadata = load_metadata(self.metadata_path)
                     error_msg = get_text(metadata, "no_tokens_available")
                     logger.error(error_msg)
                 except:
                     logger.error("No tokens available")
                 return None
-            
-            # Decrement daily capacity (called for each LM API call)
-            has_capacity = decrement_daily_capacity("metadata.json")
-            
+
+            # Refresh client if the token has changed (e.g. after rotation)
+            if self.client is None or self.client.api_key != token:
+                from openai import OpenAI
+                self.client = OpenAI(
+                    base_url="https://openrouter.ai/api/v1",
+                    api_key=token,
+                )
+                logger.info("LM client refreshed with new token")
+
+            has_capacity = decrement_daily_capacity(self.metadata_path)
             if not has_capacity:
-                # Daily capacity exhausted
                 logger.warning("Daily capacity exhausted. LM processing will fail.")
-                # Still return token, but capacity check will prevent further calls
-            
+
             return token
         except ImportError:
-            # Token management not available, return None to use existing client
             return None
     
     def _get_language_name(self, language_code: str) -> str:
@@ -283,21 +289,8 @@ class LMProcessor:
                 
                 logger.info(f"Processing original language ({language_name}) through LM...")
                 
-                # Update token before API call (decrement capacity)
-                token = self._get_token_and_decrement()
-                if token is None and attempt == 0:
-                    # Try to reinitialize client if token management failed
-                    try:
-                        from trns.bot.utils import get_current_token
-                        token = get_current_token(self.api_key_file, "metadata.json")
-                        if token:
-                            from openai import OpenAI
-                            self.client = OpenAI(
-                                base_url="https://openrouter.ai/api/v1",
-                                api_key=token,
-                            )
-                    except:
-                        pass
+                # Update token before API call (decrement capacity, refresh client if needed)
+                self._get_token_and_decrement()
                 
                 # Call LM API
                 messages = [
@@ -391,21 +384,8 @@ class LMProcessor:
                 
                 logger.info(f"Processing Russian translation through LM...")
                 
-                # Update token before API call (decrement capacity)
-                token = self._get_token_and_decrement()
-                if token is None and attempt == 0:
-                    # Try to reinitialize client if token management failed
-                    try:
-                        from trns.bot.utils import get_current_token
-                        token = get_current_token(self.api_key_file, "metadata.json")
-                        if token:
-                            from openai import OpenAI
-                            self.client = OpenAI(
-                                base_url="https://openrouter.ai/api/v1",
-                                api_key=token,
-                            )
-                    except:
-                        pass
+                # Update token before API call (decrement capacity, refresh client if needed)
+                self._get_token_and_decrement()
                 
                 # Call LM API
                 messages = [

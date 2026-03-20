@@ -1,184 +1,256 @@
-# TRNS - Transcription and Language Model Processing
+# TRNS — Video Transcription & Summarization
 
-TRNS is a powerful tool for transcribing YouTube videos, Twitter/X.com videos, and local video files with automatic translation and language model processing. It provides both a command-line interface and a Telegram bot for easy access.
+Transcribe YouTube, Twitter/X, and local video files. Automatic translation to Russian, LLM summaries via OpenRouter. Works as a CLI tool or Telegram bot.
 
 ## Tech Stack
 
 | Component | Technology |
-|-----------|------------|
-| **Telegram Bot** | [Pyrogram](https://pyrogram.org/) (MTProto) — enables large file downloads up to 2GB |
-| **Web Server** | [FastAPI](https://fastapi.tiangolo.com/) + [Uvicorn](https://www.uvicorn.org/) with webhook support |
-| **Speech-to-Text** | [faster-whisper](https://github.com/SYSTRAN/faster-whisper) — high-performance Whisper implementation |
-| **Video Download** | [yt-dlp](https://github.com/yt-dlp/yt-dlp) — supports YouTube, Twitter/X, and 1000+ sites |
-| **Subtitles** | [youtube-transcript-api](https://github.com/jdepoix/youtube-transcript-api) — auto-generated captions extraction |
-| **Translation** | [deep-translator](https://github.com/nidhaloff/deep-translator) — multi-provider translation |
-| **LLM Processing** | [OpenRouter.ai](https://openrouter.ai/) via OpenAI client — intelligent summaries |
-| **Audio Processing** | FFmpeg |
-
-## Features
-
-- 🎥 **Multi-source support**: YouTube videos, Twitter/X.com videos, and local video files (up to 2GB via Telegram)
-- 🗣️ **Speech-to-text**: High-performance transcription with faster-whisper
-- 📝 **Smart subtitle fallback**: Uses auto-generated captions when available, falls back to Whisper
-- 🌍 **Automatic translation**: Translates transcriptions to Russian
-- 🤖 **Language model processing**: Processes transcriptions through OpenRouter.ai for intelligent summaries
-- 📱 **Telegram bot**: Interactive bot with real-time transcription updates via Pyrogram MTProto
-- 🖥️ **CLI tool**: Simple command-line interface: `trns <url>`
-- ⚡ **Async processing**: Background task processing with graceful shutdown
-- 🔐 **Authentication**: User whitelist with AUTH_KEY-based onboarding
+|-----------|-----------|
+| Speech-to-text | [faster-whisper](https://github.com/SYSTRAN/faster-whisper) |
+| Video download | [yt-dlp](https://github.com/yt-dlp/yt-dlp) (YouTube, Twitter/X, 1000+ sites) |
+| Subtitles | [youtube-transcript-api](https://github.com/jdepoix/youtube-transcript-api) |
+| Translation | [deep-translator](https://github.com/nidhaloff/deep-translator) (Google Translate) |
+| LLM processing | [OpenRouter.ai](https://openrouter.ai/) via OpenAI client |
+| Telegram bot | [Pyrogram](https://pyrogram.org/) (MTProto, up to 2 GB file downloads) |
+| Webhook server | [FastAPI](https://fastapi.tiangolo.com/) + Uvicorn |
 
 ## Quick Start
 
-### Installation
+### Install
 
 ```bash
 pip install trns
+# Also need FFmpeg:
+# macOS: brew install ffmpeg
+# Linux: sudo apt install ffmpeg
 ```
 
-### CLI Usage
+### CLI
 
 ```bash
-# Transcribe a YouTube video
 trns https://www.youtube.com/watch?v=VIDEO_ID
-
-# Transcribe a Twitter/X.com video
 trns https://twitter.com/user/status/1234567890
-
-# Transcribe a local video file
 trns /path/to/video.mp4
+
+# With options
+trns https://youtu.be/abc --whisper-model medium --debug
 ```
 
-### Telegram Bot Setup
+### Telegram Bot
 
-1. Create a Telegram bot via [@BotFather](https://t.me/botfather)
-2. Get API credentials from [my.telegram.org](https://my.telegram.org) (required for Pyrogram MTProto)
-3. Set environment variables or create config files:
-   ```bash
-   export BOT_TOKEN=your_bot_token
-   export TELEGRAM_API_ID=your_api_id       # From my.telegram.org
-   export TELEGRAM_API_HASH=your_api_hash   # From my.telegram.org
-   export AUTH_KEY=your_auth_key
-   export OPENROUTER_API_KEY=your_api_key
-   ```
-   
-   **Note:** `TELEGRAM_API_ID` and `TELEGRAM_API_HASH` are required for Pyrogram's MTProto client, which enables downloading files up to 2GB (vs 20MB with Bot API).
-4. Run the bot:
-   ```bash
-   python -m trns.bot.server
-   ```
-5. Configure webhook (see [SETUP.md](docs/SETUP.md) for details)
+```bash
+export BOT_TOKEN=...            # from @BotFather
+export TELEGRAM_API_ID=...      # from my.telegram.org
+export TELEGRAM_API_HASH=...    # from my.telegram.org
+export AUTH_KEY=secret123       # users authenticate with this once
+
+python -m trns.bot.server
+```
+
+Then set up a webhook pointing to `https://your-domain/webhook`. See [Setup Guide](docs/SETUP.md).
+
+---
 
 ## Configuration
 
-TRNS supports both environment variables and file-based configuration:
+TRNS uses a JSON config file (`config.json`). On first run, a default is created automatically. You can also pass everything via CLI flags — config values override CLI defaults, but an explicit CLI `--url` always wins.
+
+### Configuration Reference
+
+Every key in `config.json` maps to a CLI flag. Here's what each one does:
+
+| Key | CLI Flag | Type | Default | Description |
+|-----|----------|------|---------|-------------|
+| `url` | positional arg | string | `""` | Video URL or local file path. Empty = must provide on command line. |
+| `method` | `--method` | `"auto"` \| `"subtitles"` \| `"whisper"` | `"auto"` | **auto**: try YouTube captions first, fall back to Whisper. **subtitles**: captions only (fails if unavailable). **whisper**: always use speech-to-text. |
+| `interval` | `--interval` | integer (seconds) | `30` | Chunk duration for live/chunked processing. Each chunk is this many seconds of audio. |
+| `language` | `--language` | string (ISO 639-1) | `"en"` | Expected language of the video. Used for subtitle extraction and as a hint for Whisper. |
+| `whisper_model` | `--whisper-model` | `"tiny"` \| `"base"` \| `"small"` \| `"medium"` \| `"large"` | `"tiny"` | Whisper model size. Larger = more accurate but slower and uses more RAM. `medium` is a good balance for most use. |
+| `use_faster_whisper` | `--use-faster-whisper` | boolean | `true` | Use the faster-whisper library (CTranslate2 backend). No reason to turn this off. |
+| `translation_output` | `--translation-output` | `"russian-only"` \| `"both"` \| `"original-only"` | `"russian-only"` | What to print for transcription output. **russian-only**: only the Russian translation. **both**: original + Russian. **original-only**: no translation. |
+| `save_transcript` | `--save-transcript` | string (file path) \| `null` | `null` | If set, appends all output to this file. Relative paths resolve against `TRNS_HOME` / CWD. |
+| `overlap` | `--overlap` | integer (seconds) | `2` | Overlap between audio chunks. Prevents words from being cut at chunk boundaries. |
+| `process_mode` | `--process-mode` | `"auto"` \| `"chunked"` \| `"full"` | `"auto"` | **auto**: full for regular videos, chunked for live streams. **full**: download entire video, transcribe with progress bar. **chunked**: process in `interval`-second pieces (required for live). |
+| `lm_window_seconds` | `--lm-window-seconds` | integer (seconds) | `120` | How much transcription context the LLM sees. It gets the last `ceil(window_seconds / interval)` chunks. |
+| `lm_interval` | `--lm-interval` | integer (seconds) | `30` | How often the LLM processes accumulated text. Can differ from `interval`. |
+| `lm_output_mode` | `--lm-output-mode` | `"both"` \| `"transcriptions-only"` \| `"lm-only"` | `"both"` | **both**: print transcriptions AND LLM summaries. **transcriptions-only**: skip LLM entirely. **lm-only**: only show LLM output. |
+| `lm_api_key_file` | `--lm-api-key-file` | string (file path) | `"api_key.txt"` | File containing OpenRouter API key(s), one per line. Multiple keys enable rotation. |
+| `lm_prompt_file` | `--lm-prompt-file` | string (file path) | `"prompt.md"` | Prompt template for Russian-language LLM processing. |
+| `lm_model` | `--lm-model` | string | `"google/gemma-3-27b-it:free"` | OpenRouter model identifier. See [openrouter.ai/models](https://openrouter.ai/models) for options. Free models have `:free` suffix. |
+| `debug` | `--debug` | boolean | `false` | **false** (production): logs go to `logs.txt`, stdout shows only transcription/LLM output. **true**: verbose logs go to stderr, useful for troubleshooting. |
+| `context` | `--context` | string | `""` | Additional context passed to the LLM (e.g. "This is a Sberbank earnings call"). Helps the model produce better summaries. |
+| `allowed_user_ids` | — | array of integers | `[]` | Telegram user IDs allowed to use the bot. Users can also authenticate at runtime via `AUTH_KEY`. |
+
+### Example config.json
+
+```json
+{
+  "url": "",
+  "method": "auto",
+  "interval": 30,
+  "language": "en",
+  "whisper_model": "medium",
+  "use_faster_whisper": true,
+  "translation_output": "russian-only",
+  "save_transcript": null,
+  "overlap": 2,
+  "process_mode": "full",
+  "lm_window_seconds": 120,
+  "lm_interval": 30,
+  "lm_output_mode": "both",
+  "lm_api_key_file": "api_key.txt",
+  "lm_prompt_file": "prompt.md",
+  "lm_model": "google/gemma-3-27b-it:free",
+  "debug": false,
+  "context": "",
+  "allowed_user_ids": []
+}
+```
 
 ### Environment Variables
 
-- `BOT_TOKEN`: Telegram bot token (from @BotFather)
-- `TELEGRAM_API_ID`: Telegram API ID (from https://my.telegram.org)
-- `TELEGRAM_API_HASH`: Telegram API Hash (from https://my.telegram.org)
-- `AUTH_KEY`: Authentication key for bot access (users authenticate once, then stored in config.json)
-- `OPENROUTER_API_KEY`: OpenRouter.ai API key
-- `HOST`: Server host (default: 0.0.0.0)
-- `PORT`: Server port (default: 8000)
-- `CONFIG_PATH`: Path to config.json (default: config.json)
-- `METADATA_PATH`: Path to metadata.json (default: metadata.json)
+These are primarily for the Telegram bot server, not the CLI:
 
-**Note:** Authenticated user IDs are stored in `config.json` after successful authentication with the AUTH_KEY.
+| Variable | Purpose | Fallback file |
+|----------|---------|---------------|
+| `BOT_TOKEN` | Telegram bot token | `bot_key.txt` |
+| `TELEGRAM_API_ID` | Pyrogram MTProto API ID (from my.telegram.org) | — |
+| `TELEGRAM_API_HASH` | Pyrogram MTProto API hash | — |
+| `AUTH_KEY` | One-time auth key for new bot users | `key.txt` |
+| `OPENROUTER_API_KEY` | OpenRouter API key (alternative to `api_key.txt`) | `api_key.txt` |
+| `HOST` | Server bind address | `0.0.0.0` |
+| `PORT` | Server port | `8000` |
+| `CONFIG_PATH` | Path to `config.json` | `config.json` |
+| `METADATA_PATH` | Path to `metadata.json` | `metadata.json` |
+| `TRNS_HOME` | Base directory for resolving all relative paths | CWD |
 
-### File-based Configuration
+### File Layout
 
-Create the following files in the project root:
+When you run TRNS, it expects these files relative to `TRNS_HOME` (defaults to your current working directory):
 
-- `bot_key.txt`: Telegram bot token
-- `key.txt`: Authentication key
-- `api_key.txt`: OpenRouter.ai API key (one per line)
-- `config.json`: Application configuration (copy from `config/config.example.json`)
+```
+your-project/
+├── config.json          # Main configuration (auto-created on first run)
+├── metadata.json        # Localization strings + daily capacity counter
+├── api_key.txt          # OpenRouter API key(s), one per line
+├── prompt.md            # LLM prompt template (Russian output)
+├── prompt_original.md   # LLM prompt template (original language output)
+├── bot_key.txt          # Telegram bot token (alternative to env var)
+├── key.txt              # Auth key (alternative to env var)
+└── logs.txt             # Production logs (auto-created)
+```
 
-**Important:** Copy `config/config.example.json` to `config.json` and customize it. The `config.json` file is not tracked in git as it contains sensitive user IDs after authentication.
-- `metadata.json`: Localization and metadata
+---
 
-See `config/` directory for example files.
+## How It Works
 
-## Requirements
+### Pipeline Flow
 
-- Python 3.8+
-- FFmpeg (for audio processing)
-  - macOS: `brew install ffmpeg`
-  - Linux: `sudo apt-get install ffmpeg`
-  - Windows: Download from [ffmpeg.org](https://ffmpeg.org/download.html)
+```
+Video URL or file
+    │
+    ├─ 1. Try YouTube auto-captions (if method=auto and it's YouTube)
+    │     └─ Success? Skip Whisper, go to step 3
+    │
+    ├─ 2. Download audio → Whisper speech-to-text
+    │     ├─ Language auto-detection
+    │     ├─ Chunk overlap to prevent word loss
+    │     └─ Progress bar (full mode) or streaming (chunked mode)
+    │
+    ├─ 3. Translate to Russian (if source ≠ Russian)
+    │     └─ Google Translate via deep-translator
+    │
+    └─ 4. LLM summarization (if lm_output_mode ≠ transcriptions-only)
+          ├─ Sends last N seconds of transcription (lm_window_seconds)
+          ├─ Bilingual mode: separate prompts for original + Russian
+          └─ Output: structured summary per prompt template
+```
+
+### Processing Modes
+
+| Mode | When | How |
+|------|------|-----|
+| **full** | Regular videos | Downloads entire video first, transcribes with progress bar. Best quality. |
+| **chunked** | Live streams | Processes audio in `interval`-second chunks. Real-time output. |
+| **auto** | Default | Picks `full` for regular videos, `chunked` for live streams. |
+
+### Whisper Models
+
+| Model | Size | Speed | Quality | RAM |
+|-------|------|-------|---------|-----|
+| `tiny` | 39M | ~32x realtime | Basic | ~1 GB |
+| `base` | 74M | ~16x realtime | OK | ~1 GB |
+| `small` | 244M | ~6x realtime | Good | ~2 GB |
+| `medium` | 769M | ~2x realtime | Very good | ~5 GB |
+| `large` | 1550M | ~1x realtime | Best | ~10 GB |
+
+### Multi-Token Setup
+
+Put multiple OpenRouter API keys in `api_key.txt` (one per line) for rotation. The system tracks daily capacity in `metadata.json` and rotates to the next key when one is exhausted. Capacity resets at UTC midnight.
+
+---
 
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                      User Interface                          │
-├───────────────────────┬─────────────────────────────────────┤
-│   CLI Interface       │     Telegram Bot Interface          │
-│   (trns command)      │     (Pyrogram + FastAPI Webhooks)   │
-└───────────┬───────────┴──────────────┬──────────────────────┘
-            │                          │
-            └──────────┬───────────────┘
+┌─────────────────────────────────────────────────────┐
+│                   User Interface                     │
+├────────────────────┬────────────────────────────────┤
+│   CLI (trns cmd)   │  Telegram Bot (Pyrogram+FastAPI)│
+└─────────┬──────────┴──────────────┬─────────────────┘
+          └────────────┬────────────┘
                        │
-         ┌─────────────▼─────────────┐
-         │   Transcription Pipeline  │
-         └─────────────┬─────────────┘
+         ┌─────────────▼──────────────┐
+         │   TranscriptionPipeline    │
+         │   (orchestration + threads)│
+         └─────────────┬──────────────┘
                        │
-    ┌──────────────────┼──────────────────┐
-    │                  │                  │
-┌───▼────────┐  ┌──────▼──────┐  ┌───────▼───────┐
-│   yt-dlp   │  │   faster-   │  │  OpenRouter   │
-│   Audio    │  │   whisper   │  │     LLM       │
-│ Extraction │  │ Transcriber │  │   Processor   │
-└────────────┘  └─────────────┘  └───────────────┘
+     ┌─────────────────┼─────────────────┐
+     │                 │                 │
+┌────▼─────┐   ┌──────▼──────┐   ┌──────▼──────┐
+│  yt-dlp  │   │   faster-   │   │ OpenRouter  │
+│  audio   │   │   whisper   │   │    LLM      │
+│ download │   │   STT       │   │  summaries  │
+└──────────┘   └─────────────┘   └─────────────┘
 ```
 
-## Documentation
+### Threading (Telegram Bot)
 
-- [Setup Guide](docs/SETUP.md) - Detailed setup instructions
-- [Deployment Guide](docs/DEPLOYMENT.md) - Cloud deployment instructions
-- [Architecture](docs/ARCHITECTURE.md) - System architecture documentation
-- [Architecture (Russian)](docs/ARCHITECTURE_RU.md) - Архитектура системы
-- [User Guide (Russian)](docs/USER_GUIDE_RU.md) - Руководство пользователя Telegram бота
+The bot uses a queue-based architecture for thread-safe output:
+
+1. Webhook arrives → FastAPI handler → spawns background thread
+2. Background thread runs `TranscriptionPipeline` with an `output_callback`
+3. `output_callback` puts text into a `queue.Queue`
+4. Async loop drains the queue and sends messages to Telegram
+
+No global state mutation — each pipeline instance is independent.
+
+---
 
 ## Development
 
 ```bash
-# Clone the repository
 git clone https://github.com/kakoyvostorg/trns.git
 cd trns
-
-# Install in development mode
 pip install -e ".[dev]"
-
-# Run tests
-pytest
-
-# Format code
-ruff format .
-
-# Type checking
-mypy src/
+pytest                    # 117 tests
+ruff format .             # code formatting
 ```
 
 ## Docker
 
 ```bash
-# Build image
 docker build -f docker/Dockerfile -t trns .
-
-# Run with docker-compose
 docker-compose -f docker/docker-compose.yml up
 ```
 
+## Further Reading
+
+- [Setup Guide](docs/SETUP.md) — installation, FFmpeg, webhook config
+- [Deployment Guide](docs/DEPLOYMENT.md) — production deployment (Yandex Cloud, VMs, Docker)
+- [Architecture](docs/ARCHITECTURE.md) — detailed system internals
+- [Руководство пользователя](docs/USER_GUIDE_RU.md) — Telegram bot user guide (Russian)
+
 ## License
 
-MIT License - see [LICENSE](LICENSE) file for details.
-
-## Contributing
-
-Contributions are welcome! Please read our contributing guidelines and submit pull requests.
-
-## Support
-
-For issues and questions, please open an issue on GitHub.
+MIT — see [LICENSE](LICENSE).

@@ -329,47 +329,66 @@ Examples:
         elif not args.url and config.get("url"):
             args.url = config["url"]  # Use config URL only if CLI didn't provide one
     
+    # Resolve TRNS_HOME: base directory for all relative resource paths
+    trns_home = os.path.abspath(os.environ.get("TRNS_HOME", os.getcwd()))
+    args.trns_home = trns_home
+
+    def _resolve(path):
+        """Resolve relative path against trns_home"""
+        if path and not os.path.isabs(path):
+            return os.path.join(trns_home, path)
+        return path
+
+    # Resolve all file-path args
+    args.lm_api_key_file = _resolve(getattr(args, 'lm_api_key_file', 'api_key.txt'))
+    args.lm_prompt_file = _resolve(getattr(args, 'lm_prompt_file', 'prompt.md'))
+    args.lm_prompt_original_file = _resolve(getattr(args, 'lm_prompt_original_file', 'prompt_original.md'))
+    if args.save_transcript:
+        args.save_transcript = _resolve(args.save_transcript)
+    args.metadata_path = _resolve("metadata.json")
+
     # Configure logging based on debug mode
     import logging.handlers
-    
+
     # Remove existing handlers
     root_logger = logging.getLogger()
     for handler in root_logger.handlers[:]:
         root_logger.removeHandler(handler)
-    
+
+    logs_path = _resolve('logs.txt')
+
+    formatter = logging.Formatter('%(asctime)s [%(levelname)s] %(name)s: %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
+
     if args.debug:
-        # Debug mode: log everything to stdout
-        handler = logging.StreamHandler(sys.stdout)
+        # Debug mode: log everything to stderr (won't be overwritten by tqdm on stdout)
+        handler = logging.StreamHandler(sys.stderr)
         handler.setLevel(logging.DEBUG)
-        formatter = logging.Formatter('%(asctime)s [%(levelname)s] %(name)s: %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
         handler.setFormatter(formatter)
         root_logger.addHandler(handler)
         root_logger.setLevel(logging.DEBUG)
-        logger.info("Debug mode enabled - verbose logging to stdout")
+        logger.info("Debug mode enabled - verbose logging to stderr")
     else:
-        # Production mode: log to logs.txt, only INFO and above
+        # Production mode: log to logs.txt
         try:
             file_handler = logging.handlers.RotatingFileHandler(
-                'logs.txt',
+                logs_path,
                 maxBytes=10*1024*1024,  # 10MB
                 backupCount=5,
                 encoding='utf-8'
             )
             file_handler.setLevel(logging.DEBUG)
-            formatter = logging.Formatter('%(asctime)s [%(levelname)s] %(name)s: %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
             file_handler.setFormatter(formatter)
             root_logger.addHandler(file_handler)
             root_logger.setLevel(logging.DEBUG)
-            logger.info("Production mode enabled - logging to logs.txt")
+            logger.info(f"Production mode enabled - logging to {logs_path}")
         except Exception as e:
-            # Fallback to stdout if file logging fails
-            handler = logging.StreamHandler(sys.stdout)
+            # Fallback to stderr if file logging fails
+            handler = logging.StreamHandler(sys.stderr)
             handler.setLevel(logging.INFO)
-            formatter = logging.Formatter('%(asctime)s [%(levelname)s] %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
             handler.setFormatter(formatter)
             root_logger.addHandler(handler)
             root_logger.setLevel(logging.INFO)
-            logger.warning(f"Failed to create logs.txt, falling back to stdout: {e}")
+            logger.warning(f"Failed to create {logs_path}, falling back to stderr: {e}")
     
     # Extract video ID (URL can come from CLI or config)
     if not args.url:

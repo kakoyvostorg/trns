@@ -42,19 +42,22 @@ class TranscriptionPipeline:
         self,
         video_id: str,
         args,
-        shutdown_flag: Callable[[], bool]
+        shutdown_flag: Callable[[], bool],
+        output_callback: Optional[Callable[[str], None]] = None
     ):
         """
         Initialize transcription pipeline.
-        
+
         Args:
             video_id: YouTube video ID
             args: Parsed command-line arguments
             shutdown_flag: Callable that returns True if shutdown requested
+            output_callback: Optional callback for output text. If None, uses print().
         """
         self.video_id = video_id
         self.args = args
         self.shutdown_flag = shutdown_flag
+        self._output_callback = output_callback
         
         # Initialize components
         self.subtitle_extractor = None
@@ -111,7 +114,14 @@ class TranscriptionPipeline:
         
         # Track detected language for bilingual LM mode
         self.detected_language = "ru"  # Default to Russian
-    
+
+    def _output(self, text: str):
+        """Send output text via callback or print()"""
+        if self._output_callback is not None:
+            self._output_callback(text)
+        else:
+            print(text, flush=True)
+
     def initialize_components(self):
         """Initialize subtitle extractor, whisper transcriber, and LM processor"""
         # Initialize subtitle extractor if needed
@@ -193,7 +203,8 @@ class TranscriptionPipeline:
                     context=getattr(self.args, 'context', ''),
                     shutdown_flag=self.shutdown_flag,
                     use_bilingual=use_bilingual_mode,
-                    detected_language=self.detected_language
+                    detected_language=self.detected_language,
+                    metadata_path=getattr(self.args, 'metadata_path', 'metadata.json')
                 )
                 logger.info(f"LM processor initialized (bilingual mode: {use_bilingual_mode})")
             except Exception as e:
@@ -251,7 +262,7 @@ class TranscriptionPipeline:
                     # Audio extraction failed - log and skip
                     error_msg = f"\n[ERROR] Audio extraction failed for chunk #{chunk_iteration}. Skipping transcription.\n"
                     logger.error(f"Audio path is None for chunk #{chunk_iteration}, skipping transcription")
-                    print(error_msg, flush=True)  # Send error to Telegram via stdout capture
+                    self._output(error_msg)
                     self.transcription_queue.task_done()
                     continue
                 
@@ -273,38 +284,37 @@ class TranscriptionPipeline:
                     
                     # Remove overlap from beginning of current chunk if we have overlap text
                     if overlap_text and overlap_text.strip():
-                        # Find overlap text at the start of current chunk
                         text_lower = text.lower().strip()
                         overlap_lower = overlap_text.lower().strip()
-                        
-                        # Try to find and remove overlap (check first N words)
-                        if text_lower.startswith(overlap_lower):
-                            # Exact match at start
-                            text = text[len(overlap_text):].strip()
-                            translated_text = translated_text[len(overlap_translated):].strip() if len(translated_text) >= len(overlap_translated) else translated_text
-                            logger.debug(f"Removed exact overlap from chunk #{chunk_iteration}")
-                        else:
-                            # Try to find overlap by matching first few words
-                            text_words = text.split()
-                            overlap_words = overlap_text.split()
-                            if len(overlap_words) > 0 and len(text_words) > 0:
-                                # Check if first N words match (where N = overlap word count)
-                                match_count = 0
-                                for i in range(min(len(overlap_words), len(text_words))):
-                                    if text_words[i].lower() == overlap_words[i].lower():
-                                        match_count += 1
-                                    else:
-                                        break
-                                
-                                # If significant overlap found (at least 3 words or 50% of overlap), remove it
-                                if match_count >= min(3, len(overlap_words) * 0.5):
-                                    text = " ".join(text_words[match_count:]).strip()
-                                    # For translated, try similar approach
-                                    trans_words = translated_text.split()
-                                    trans_overlap_words = overlap_translated.split()
-                                    if len(trans_words) > match_count:
-                                        translated_text = " ".join(trans_words[match_count:]).strip()
-                                    logger.debug(f"Removed {match_count} overlapping words from chunk #{chunk_iteration}")
+
+                        # Count matching words at start of original text
+                        text_words = text.split()
+                        overlap_words = overlap_text.split()
+                        match_count = 0
+                        if len(overlap_words) > 0 and len(text_words) > 0:
+                            for i in range(min(len(overlap_words), len(text_words))):
+                                if text_words[i].lower() == overlap_words[i].lower():
+                                    match_count += 1
+                                else:
+                                    break
+
+                        # Also count matching words for translated text independently
+                        trans_words = translated_text.split()
+                        trans_overlap_words = (overlap_translated or "").split()
+                        trans_match_count = 0
+                        if len(trans_overlap_words) > 0 and len(trans_words) > 0:
+                            for i in range(min(len(trans_overlap_words), len(trans_words))):
+                                if trans_words[i].lower() == trans_overlap_words[i].lower():
+                                    trans_match_count += 1
+                                else:
+                                    break
+
+                        if match_count >= min(3, max(1, len(overlap_words) * 0.5)):
+                            text = " ".join(text_words[match_count:]).strip()
+                            # Remove translated overlap by its own word match count
+                            if trans_match_count > 0:
+                                translated_text = " ".join(trans_words[trans_match_count:]).strip()
+                            logger.debug(f"Removed {match_count} overlapping words (orig) and {trans_match_count} (trans) from chunk #{chunk_iteration}")
                     
                     # Store last N words for next chunk overlap detection
                     words_to_store = max(4, int(self.overlap_seconds * 2))
@@ -529,7 +539,7 @@ class TranscriptionPipeline:
                 # Reload prompt if language changed and bilingual mode is on
                 if self.lm_processor.use_bilingual:
                     try:
-                        self.lm_processor._load_prompt()
+                        self.lm_processor._load_prompts()
                     except Exception as e:
                         logger.warning(f"Failed to reload prompt after language detection: {e}")
         
@@ -562,15 +572,12 @@ class TranscriptionPipeline:
             else:
                 logger.debug(f"🎤 Chunk{iter_str} ({language}, prob={language_prob:.2f}): {text[:50]}...")
             
-            # Always print transcription to stdout (this is the main output)
+            # Output transcription text
             if self.show_original_translation and language != "ru" and language != "unknown":
-                # Print original with language label
-                print(f"\n[{language}] {text}\n", flush=True)
-                # Print Russian translation without label (add hidden marker for immediate send)
-                print(f"\n{translated_text} [.]\n", flush=True)
+                self._output(f"\n[{language}] {text}\n")
+                self._output(f"\n{translated_text} [.]\n")
             else:
-                # Print Russian only
-                print(f"\n{translated_text}\n", flush=True)
+                self._output(f"\n{translated_text}\n")
             
             # Save to file if requested
             if self.args.save_transcript:
@@ -604,10 +611,9 @@ class TranscriptionPipeline:
                     logger.debug(f"📊 Bilingual LM Report generated")
                 
                 # Print LM Report label, then original, then Russian (3 separate messages)
-                # Add hidden markers to trigger immediate sends in Telegram bot
-                print(f"\n[LM Report]\n", flush=True)
-                print(f"\n{original_text} [.]\n", flush=True)
-                print(f"\n{russian_text} [.]\n", flush=True)
+                self._output(f"\n[LM Report]\n")
+                self._output(f"\n{original_text} [.]\n")
+                self._output(f"\n{russian_text} [.]\n")
                 
                 # Save to file if requested
                 if self.args.save_transcript:
@@ -627,9 +633,7 @@ class TranscriptionPipeline:
                 else:
                     logger.debug(f"📊 LM Report: {report_str[:50]}...")
                 
-                # Always print LM report to stdout (this is the main output)
-                # Print LM Report label as separate message, then the report
-                print(f"\nLM Report:\n{report_str}\n", flush=True)
+                self._output(f"\nLM Report:\n{report_str}\n")
                 
                 # Save to file if requested
                 if self.args.save_transcript:
@@ -728,7 +732,7 @@ class TranscriptionPipeline:
         # Print context at the beginning in production mode
         context = getattr(self.args, 'context', '')
         if not self.debug_mode and context and context.strip():
-            print(f"\nДополнительный контекст: {context}\n", flush=True)
+            self._output(f"\nДополнительный контекст: {context}\n")
         
         # Try full video processing first
         if self._process_full_video():
@@ -836,13 +840,10 @@ class TranscriptionPipeline:
                                 if lm_output_mode == "transcriptions-only" or lm_output_mode == "both":
                                     # Use user setting for showing original
                                     if self.show_original_translation and self.args.language != "ru":
-                                        # Print original with language label
-                                        print(f"\n[{self.args.language}] {text}\n", flush=True)
-                                        # Print Russian translation without label (add hidden marker for immediate send)
-                                        print(f"\n{translated_text} [.]\n", flush=True)
+                                        self._output(f"\n[{self.args.language}] {text}\n")
+                                        self._output(f"\n{translated_text} [.]\n")
                                     else:
-                                        # Print Russian only
-                                        print(f"\n{translated_text}\n", flush=True)
+                                        self._output(f"\n{translated_text}\n")
                                 
                                 # Save to file if requested
                                 if self.args.save_transcript:
@@ -1028,7 +1029,7 @@ class TranscriptionPipeline:
                             if not audio_path:
                                 error_msg = f"\n[ERROR] Failed to extract audio chunk at {self.current_time_position:.1f}s. Skipping this chunk.\n"
                                 logger.error(f"Audio extraction failed at {self.current_time_position:.1f}s")
-                                print(error_msg, flush=True)  # Send error to Telegram via stdout capture
+                                self._output(error_msg)
                                 # Wait a bit before retrying next chunk
                                 time.sleep(2)
                                 continue
@@ -1136,15 +1137,15 @@ class TranscriptionPipeline:
                                     consecutive_failures += 1
                                     error_msg = f"\n[ERROR] Failed to extract audio chunk ({consecutive_failures}/{MAX_CONSECUTIVE_FAILURES}). Skipping this chunk.\n"
                                     logger.error(f"Audio extraction failed, skipping chunk (consecutive failures: {consecutive_failures})")
-                                    print(error_msg, flush=True)  # Send error to Telegram via stdout capture
+                                    self._output(error_msg)
                                     
                                     # Stop if too many consecutive failures
                                     if consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
                                         error_msg = f"\n[ERROR] Too many consecutive failures ({consecutive_failures}). Stopping transcription.\n"
                                         logger.error(f"Stopping transcription due to {consecutive_failures} consecutive failures")
-                                        print(error_msg, flush=True)
+                                        self._output(error_msg)
                                         break
-                                    
+
                                     next_audio_path = None
                                 first_chunk = False
                                 
@@ -1166,7 +1167,7 @@ class TranscriptionPipeline:
                             if consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
                                 error_msg = f"\n[ERROR] Too many consecutive failures ({consecutive_failures}). Stopping transcription.\n"
                                 logger.error(f"Stopping transcription due to {consecutive_failures} consecutive failures")
-                                print(error_msg, flush=True)
+                                self._output(error_msg)
                                 break
                             
                             # Continue to next iteration even if this one failed
@@ -1277,11 +1278,11 @@ class TranscriptionPipeline:
                 logger.info(f"Final incomplete text: {self.text_buffer}")
                 timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 if self.args.translation_output == "russian-only":
-                    print(f"\n{self.translated_buffer}\n", flush=True)
+                    self._output(f"\n{self.translated_buffer}\n")
                 elif self.args.translation_output == "both":
-                    print(f"\n{self.text_buffer}\n[RU] {self.translated_buffer}\n", flush=True)
+                    self._output(f"\n{self.text_buffer}\n[RU] {self.translated_buffer}\n")
                 else:
-                    print(f"\n{self.text_buffer}\n", flush=True)
+                    self._output(f"\n{self.text_buffer}\n")
         
         except KeyboardInterrupt:
             logger.info("\nInterrupted by user")

@@ -41,6 +41,25 @@ from trns.bot.output_handler import send_text_to_telegram
 
 logger = logging.getLogger(__name__)
 
+# Base directory for resolving relative resource paths (same as CLI)
+_trns_home = os.path.abspath(os.environ.get("TRNS_HOME", os.getcwd()))
+
+
+def _resolve_args_paths(args):
+    """Resolve relative file paths in args against TRNS_HOME."""
+    def _resolve(path):
+        if path and not os.path.isabs(path):
+            return os.path.join(_trns_home, path)
+        return path
+
+    args.lm_api_key_file = _resolve(getattr(args, 'lm_api_key_file', 'api_key.txt'))
+    args.lm_prompt_file = _resolve(getattr(args, 'lm_prompt_file', 'prompt.md'))
+    args.lm_prompt_original_file = _resolve(getattr(args, 'lm_prompt_original_file', 'prompt_original.md'))
+    args.metadata_path = _resolve(getattr(args, 'metadata_path', 'metadata.json'))
+    if getattr(args, 'save_transcript', None):
+        args.save_transcript = _resolve(args.save_transcript)
+    return args
+
 # User states
 STATE_WAITING_KEY = "waiting_key"
 STATE_WAITING_CONTEXT = "waiting_context"
@@ -52,19 +71,22 @@ processing_lock = threading.Lock()
 
 # Store user states (in-memory, can be moved to persistent storage if needed)
 user_states = {}
+_user_states_lock = threading.Lock()
 
 
 def get_user_state(user_id: int) -> Optional[str]:
-    """Get user state"""
-    return user_states.get(user_id)
+    """Get user state (thread-safe)"""
+    with _user_states_lock:
+        return user_states.get(user_id)
 
 
 def set_user_state(user_id: int, state: Optional[str]):
-    """Set user state"""
-    if state is None:
-        user_states.pop(user_id, None)
-    else:
-        user_states[user_id] = state
+    """Set user state (thread-safe)"""
+    with _user_states_lock:
+        if state is None:
+            user_states.pop(user_id, None)
+        else:
+            user_states[user_id] = state
 
 
 def handle_task_error(task: asyncio.Task, user_id: int):
@@ -235,46 +257,193 @@ def is_twitter_url(text: str) -> bool:
     return False
 
 
-async def process_youtube_video(url: str, user_id: int, client: Client, message: Message):
-    """Process YouTube video using TranscriptionPipeline with callback handler"""
+async def _run_pipeline_with_output(
+    video_id: str, args, user_id: int, client: Client,
+    chat_id: int, shutdown_flag: threading.Event, metadata: dict, source: str
+):
+    """
+    Shared helper: run TranscriptionPipeline in an executor thread and stream
+    output to Telegram via a queue-based async consumer.
+
+    Replaces the old builtins.print monkey-patch with a thread-safe
+    output_callback passed directly to the pipeline.
+    """
+    output_queue = queue.Queue()
+
+    def output_callback(text: str):
+        """Thread-safe callback that queues text for async sending."""
+        try:
+            output_queue.put_nowait(text)
+        except queue.Full:
+            pass
+        logger.debug(f"Pipeline output: {text.strip()}")
+
+    def run_pipeline():
+        """Run pipeline in executor thread (no builtins.print patching)."""
+        try:
+            pipeline = TranscriptionPipeline(
+                video_id=video_id,
+                args=args,
+                shutdown_flag=lambda: shutdown_flag.is_set(),
+                output_callback=output_callback,
+            )
+            pipeline.debug_mode = False
+            pipeline.run()
+        except Exception as e:
+            logger.exception(f"Error in pipeline: {e}")
+            try:
+                output_queue.put_nowait(f"\n[ERROR] {str(e)}\n")
+            except:
+                pass
+        finally:
+            try:
+                output_queue.put_nowait(None)  # None signals end
+            except:
+                pass
+
+    async def send_output_task():
+        """Consume the output queue and send to Telegram in real-time."""
+        import time as _time
+        buffer = ""
+        last_send_time = 0
+        send_interval = 2.0
+
+        while True:
+            try:
+                try:
+                    text = output_queue.get(timeout=1.0)
+                except queue.Empty:
+                    if shutdown_flag.is_set():
+                        if buffer.strip():
+                            await send_text_to_telegram(client, chat_id, buffer)
+                        break
+                    continue
+
+                if text is None:
+                    if buffer.strip():
+                        await send_text_to_telegram(client, chat_id, buffer)
+                    break
+
+                buffer += text
+                is_transcription = '[' in text and ']' in text
+                current_time = _time.time()
+                should_send = (
+                    is_transcription
+                    or (current_time - last_send_time >= send_interval and buffer.strip())
+                )
+
+                if should_send and buffer.strip():
+                    await send_text_to_telegram(client, chat_id, buffer)
+                    buffer = ""
+                    last_send_time = current_time
+
+                output_queue.task_done()
+            except Exception as e:
+                logger.error(f"Error in output sender: {e}", exc_info=True)
+
+    # Send processing started message
+    try:
+        await client.send_message(chat_id=chat_id, text=get_text(metadata, "processing_started"))
+    except Exception as e:
+        logger.error(f"Error sending processing started message: {e}")
+
+    output_task = asyncio.create_task(send_output_task())
+
+    loop = asyncio.get_event_loop()
+    executor_task = None
+    try:
+        executor_task = loop.run_in_executor(None, run_pipeline)
+
+        with processing_lock:
+            if user_id in user_processing_tasks:
+                user_processing_tasks[user_id]["executor_task"] = executor_task
+                user_processing_tasks[user_id]["output_task"] = output_task
+
+        await executor_task
+    except asyncio.CancelledError:
+        logger.info(f"Pipeline executor task cancelled for user {user_id}")
+        if executor_task and not executor_task.done():
+            executor_task.cancel()
+            try:
+                await executor_task
+            except asyncio.CancelledError:
+                pass
+    except Exception as e:
+        logger.exception(f"Error in pipeline execution: {e}")
+        try:
+            await client.send_message(
+                chat_id=chat_id,
+                text=f"{get_text(metadata, 'error_occurred')} {str(e)}",
+            )
+        except Exception as e2:
+            logger.error(f"Error sending error message: {e2}")
+    finally:
+        try:
+            await asyncio.wait_for(output_task, timeout=30.0)
+        except asyncio.TimeoutError:
+            logger.warning("Timeout waiting for output task, cancelling")
+            output_task.cancel()
+            try:
+                await asyncio.wait_for(output_task, timeout=5.0)
+            except (asyncio.TimeoutError, asyncio.CancelledError):
+                pass
+        except asyncio.CancelledError:
+            pass
+
+    if not shutdown_flag.is_set():
+        try:
+            await client.send_message(chat_id=chat_id, text=get_text(metadata, "processing_complete"))
+        except Exception as e:
+            logger.debug(f"Error sending completion message: {e}")
+
+
+async def _process_url_video(url: str, video_id: str, user_id: int, client: Client, message: Message, source: str):
+    """
+    Shared processing for YouTube and Twitter/X.com URLs.
+    Handles config loading, user settings, pipeline execution, and cleanup.
+    """
     from trns.bot.server import bot_metadata
-    
+
     metadata = bot_metadata if bot_metadata else load_metadata()
     chat_id = message.chat.id
-    
-    # Get shutdown flag from task info (created atomically in handler)
+
     shutdown_flag = None
     with processing_lock:
         if user_id in user_processing_tasks:
             shutdown_flag = user_processing_tasks[user_id].get("shutdown_flag")
-    
+
     if shutdown_flag is None:
         logger.error(f"Shutdown flag not found for user {user_id}")
         try:
-            await client.send_message(chat_id=chat_id, text=get_text(metadata, "error_occurred") + " Internal error: missing shutdown flag.")
+            await client.send_message(
+                chat_id=chat_id,
+                text=get_text(metadata, "error_occurred") + " Internal error: missing shutdown flag.",
+            )
         except Exception as e:
             logger.error(f"Error sending error message: {e}")
         return
-    
+
     try:
-        # Extract video ID
-        video_id = extract_video_id(url)
-        logger.info(f"Processing YouTube video: {video_id}")
-        
-        # Load config
+        logger.info(f"Processing {source} video: {video_id}")
+
         config = load_config_main()
         if config is None:
             config = create_default_config()
-        
-        # Create a simple args object from config
+
+        # Load user settings (fixes bug where YouTube path was missing this)
+        show_original = get_user_setting(user_id, "show_original_translation", default=True)
+        show_transcription = get_user_setting(user_id, "show_transcription", default=True)
+
         class Args:
             pass
-        
+
         args = Args()
         args = apply_config_to_args(args, config)
+        args = _resolve_args_paths(args)
         args.url = url
-        
-        # Validate client instance
+        args.show_original_translation = show_original
+        args.show_transcription = show_transcription
+
         if client is None:
             logger.error(f"Client instance is None for user_id={user_id}, chat_id={chat_id}")
             try:
@@ -282,437 +451,52 @@ async def process_youtube_video(url: str, user_id: int, client: Client, message:
             except Exception as e:
                 logger.error(f"Error sending error message: {e}")
             return
-        
-        # Send processing started message
-        try:
-            await client.send_message(chat_id=chat_id, text=get_text(metadata, "processing_started"))
-        except Exception as e:
-            logger.error(f"Error sending processing started message: {e}")
-            # Continue anyway
-        
-        # Use a queue to send output in real-time
-        # This avoids interfering with subprocess calls (yt-dlp/ffmpeg)
-        output_queue = queue.Queue()
-        
-        def capture_print(*args, **kwargs):
-            """Capture print calls and queue them for real-time sending"""
-            # Build the message like print() would
-            sep = kwargs.get('sep', ' ')
-            end = kwargs.get('end', '\n')
-            text = sep.join(str(a) for a in args) + end
-            
-            # Queue the output for async sending
-            try:
-                output_queue.put_nowait(text)
-            except queue.Full:
-                # Queue full, skip (shouldn't happen with unbounded queue)
-                pass
-            # Also log it for debugging
-            logger.debug(f"Pipeline output: {text.strip()}")
-        
-        # Monkey-patch print for this execution
-        import builtins
-        original_print = builtins.print
-        
-        def run_pipeline():
-            """Run pipeline with captured print output"""
-            builtins.print = capture_print
-            try:
-                pipeline = TranscriptionPipeline(
-                    video_id=video_id,
-                    args=args,
-                    shutdown_flag=lambda: shutdown_flag.is_set()
-                )
-                pipeline.debug_mode = False
-                pipeline.run()
-            except Exception as e:
-                logger.exception(f"Error in pipeline: {e}")
-                # Queue error message
-                try:
-                    output_queue.put_nowait(f"\n[ERROR] {str(e)}\n")
-                except:
-                    pass
-            finally:
-                # Restore original print
-                builtins.print = original_print
-                # Signal end of output
-                try:
-                    output_queue.put_nowait(None)  # None signals end
-                except:
-                    pass
-        
-        # Async task to consume output queue and send to Telegram in real-time
-        async def send_output_task():
-            """Send output from queue to Telegram in real-time"""
-            buffer = ""
-            last_send_time = 0
-            send_interval = 2.0  # Send every 2 seconds or immediately for transcriptions
-            
-            while True:
-                try:
-                    # Get output from queue with timeout
-                    try:
-                        text = output_queue.get(timeout=1.0)
-                    except queue.Empty:
-                        # Check if shutdown requested
-                        if shutdown_flag.is_set():
-                            # Send any remaining buffer
-                            if buffer.strip():
-                                await send_text_to_telegram(client, chat_id, buffer)
-                            break
-                        continue
-                    
-                    # None signals end of output
-                    if text is None:
-                        # Send any remaining buffer
-                        if buffer.strip():
-                            await send_text_to_telegram(client, chat_id, buffer)
-                        break
-                    
-                    # Add to buffer
-                    buffer += text
-                    
-                    # Check if this is a transcription (contains timestamp brackets)
-                    is_transcription = '[' in text and ']' in text
-                    
-                    # Send immediately for transcriptions, or periodically for other output
-                    import time
-                    current_time = time.time()
-                    should_send = (
-                        is_transcription or 
-                        (current_time - last_send_time >= send_interval and buffer.strip())
-                    )
-                    
-                    if should_send and buffer.strip():
-                        await send_text_to_telegram(client, chat_id, buffer)
-                        buffer = ""
-                        last_send_time = current_time
-                    
-                    output_queue.task_done()
-                except Exception as e:
-                    logger.error(f"Error in output sender: {e}", exc_info=True)
-                    # Continue processing
-        
-        # Start output sender task
-        output_task = asyncio.create_task(send_output_task())
-        
-        # Run pipeline in executor
-        loop = asyncio.get_event_loop()
-        executor_task = None
-        try:
-            # Store executor future so it can be cancelled
-            executor_task = loop.run_in_executor(None, run_pipeline)
-            
-            # Update task info with executor task atomically
-            with processing_lock:
-                if user_id in user_processing_tasks:
-                    user_processing_tasks[user_id]["executor_task"] = executor_task
-                    user_processing_tasks[user_id]["output_task"] = output_task
-            
-            # Wait for pipeline to complete
-            await executor_task
-        except asyncio.CancelledError:
-            logger.info(f"Pipeline executor task cancelled for user {user_id}")
-            # Cancel the executor task if possible
-            if executor_task and not executor_task.done():
-                executor_task.cancel()
-                try:
-                    await executor_task
-                except asyncio.CancelledError:
-                    pass
-        except Exception as e:
-            logger.exception(f"Error in pipeline execution: {e}")
-            try:
-                await client.send_message(chat_id=chat_id, text=f"{get_text(metadata, 'error_occurred')} {str(e)}")
-            except Exception as e2:
-                logger.error(f"Error sending error message: {e2}")
-        finally:
-            # Always wait for output task to finish (with timeout - increased to 30s for LM processing)
-            try:
-                await asyncio.wait_for(output_task, timeout=30.0)
-            except asyncio.TimeoutError:
-                logger.warning("Timeout waiting for output task, cancelling")
-                output_task.cancel()
-                try:
-                    await asyncio.wait_for(output_task, timeout=5.0)
-                except (asyncio.TimeoutError, asyncio.CancelledError):
-                    pass
-            except asyncio.CancelledError:
-                pass
-        
-        # Only send completion message if not cancelled
-        if not shutdown_flag.is_set():
-            try:
-                await client.send_message(chat_id=chat_id, text=get_text(metadata, "processing_complete"))
-            except Exception as e:
-                logger.debug(f"Error sending completion message: {e}")
-        
-        # Reset context after processing
+
+        await _run_pipeline_with_output(
+            video_id=video_id, args=args, user_id=user_id,
+            client=client, chat_id=chat_id, shutdown_flag=shutdown_flag,
+            metadata=metadata, source=source,
+        )
+
         reset_context()
-        
+
     except asyncio.CancelledError:
         logger.info(f"Processing cancelled for user {user_id}")
         try:
             await client.send_message(chat_id=chat_id, text=get_text(metadata, "cancel_success"))
         except Exception as e:
             logger.debug(f"Error sending cancel message: {e}")
-        # Reset context on cancel
         reset_context()
     except Exception as e:
-        logger.exception(f"Error processing YouTube video: {e}")
+        logger.exception(f"Error processing {source} video: {e}")
         error_text = get_text(metadata, "error_occurred")
         try:
             await client.send_message(chat_id=chat_id, text=f"{error_text} {str(e)}")
         except Exception as e2:
             logger.error(f"Error sending error message: {e2}")
-        # Reset context on error
         reset_context()
     finally:
-        # Always clear processing state in finally block
         with processing_lock:
             if user_id in user_processing_tasks:
                 del user_processing_tasks[user_id]
+
+
+async def process_youtube_video(url: str, user_id: int, client: Client, message: Message):
+    """Process YouTube video using TranscriptionPipeline."""
+    video_id = extract_video_id(url)
+    await _process_url_video(url, video_id, user_id, client, message, source="YouTube")
 
 
 async def process_twitter_video(url: str, user_id: int, client: Client, message: Message):
-    """Process Twitter/X.com video using TranscriptionPipeline (same as YouTube)"""
-    from trns.bot.server import bot_metadata
-    
-    metadata = bot_metadata if bot_metadata else load_metadata()
-    chat_id = message.chat.id
-    
-    # Get shutdown flag from task info (created atomically in handler)
-    shutdown_flag = None
-    with processing_lock:
-        if user_id in user_processing_tasks:
-            shutdown_flag = user_processing_tasks[user_id].get("shutdown_flag")
-    
-    if shutdown_flag is None:
-        logger.error(f"Shutdown flag not found for user {user_id}")
+    """Process Twitter/X.com video using TranscriptionPipeline."""
+    video_id = url
+    if "/status/" in url:
         try:
-            await client.send_message(chat_id=chat_id, text=get_text(metadata, "error_occurred") + " Internal error: missing shutdown flag.")
-        except Exception as e:
-            logger.error(f"Error sending error message: {e}")
-        return
-    
-    try:
-        # For Twitter, use the URL directly as video_id (yt-dlp handles Twitter URLs)
-        # Extract a simple identifier from URL for logging
-        video_id = url
-        if "/status/" in url:
-            # Extract status ID for logging
-            try:
-                status_id = url.split("/status/")[-1].split("?")[0]
-                video_id = f"twitter_{status_id}"
-            except:
-                video_id = "twitter_video"
-        logger.info(f"Processing Twitter video: {url}")
-        
-        # Load config
-        config = load_config_main()
-        if config is None:
-            config = create_default_config()
-        
-        # Load user settings
-        show_original = get_user_setting(user_id, "show_original_translation", default=True)
-        show_transcription = get_user_setting(user_id, "show_transcription", default=True)
-        
-        # Create a simple args object from config
-        class Args:
-            pass
-        
-        args = Args()
-        args = apply_config_to_args(args, config)
-        args.url = url  # Use full URL for yt-dlp
-        args.show_original_translation = show_original
-        args.show_transcription = show_transcription
-        
-        # Validate client instance
-        if client is None:
-            logger.error(f"Client instance is None for user_id={user_id}, chat_id={chat_id}")
-            try:
-                await message.reply_text(get_text(metadata, "error_occurred") + " Client instance is invalid.")
-            except Exception as e:
-                logger.error(f"Error sending error message: {e}")
-            return
-        
-        # Send processing started message
-        try:
-            await client.send_message(chat_id=chat_id, text=get_text(metadata, "processing_started"))
-        except Exception as e:
-            logger.error(f"Error sending processing started message: {e}")
-            # Continue anyway
-        
-        # Use a queue to send output in real-time
-        output_queue = queue.Queue()
-        
-        def capture_print(*args, **kwargs):
-            """Capture print calls and queue them for real-time sending"""
-            sep = kwargs.get('sep', ' ')
-            end = kwargs.get('end', '\n')
-            text = sep.join(str(a) for a in args) + end
-            
-            try:
-                output_queue.put_nowait(text)
-            except queue.Full:
-                pass
-            logger.debug(f"Pipeline output: {text.strip()}")
-        
-        # Monkey-patch print for this execution
-        import builtins
-        original_print = builtins.print
-        
-        def run_pipeline():
-            """Run pipeline with captured print output"""
-            builtins.print = capture_print
-            try:
-                # For Twitter, we need to modify TranscriptionPipeline to accept URLs directly
-                # Since it expects video_id, we'll pass the URL and modify the pipeline's behavior
-                # Actually, yt-dlp in WhisperTranscriber should handle Twitter URLs
-                # But TranscriptionPipeline uses video_id for YouTube-specific logic
-                # Let's use the URL as video_id and let yt-dlp handle it
-                pipeline = TranscriptionPipeline(
-                    video_id=url,  # Pass URL directly, yt-dlp will handle it
-                    args=args,
-                    shutdown_flag=lambda: shutdown_flag.is_set()
-                )
-                pipeline.debug_mode = False
-                pipeline.run()
-            except Exception as e:
-                logger.exception(f"Error in pipeline: {e}")
-                try:
-                    output_queue.put_nowait(f"\n[ERROR] {str(e)}\n")
-                except:
-                    pass
-            finally:
-                # Restore original print
-                builtins.print = original_print
-                # Signal end of output
-                try:
-                    output_queue.put_nowait(None)  # None signals end
-                except:
-                    pass
-        
-        # Async task to consume output queue and send to Telegram in real-time
-        async def send_output_task():
-            """Send output from queue to Telegram in real-time"""
-            buffer = ""
-            last_send_time = 0
-            send_interval = 2.0  # Send every 2 seconds or immediately for transcriptions
-            
-            while True:
-                try:
-                    try:
-                        text = output_queue.get(timeout=1.0)
-                    except queue.Empty:
-                        if shutdown_flag.is_set():
-                            if buffer.strip():
-                                await send_text_to_telegram(client, chat_id, buffer)
-                            break
-                        continue
-                    
-                    if text is None:
-                        if buffer.strip():
-                            await send_text_to_telegram(client, chat_id, buffer)
-                        break
-                    
-                    buffer += text
-                    
-                    is_transcription = '[' in text and ']' in text
-                    
-                    import time
-                    current_time = time.time()
-                    should_send = (
-                        is_transcription or 
-                        (current_time - last_send_time >= send_interval and buffer.strip())
-                    )
-                    
-                    if should_send and buffer.strip():
-                        await send_text_to_telegram(client, chat_id, buffer)
-                        buffer = ""
-                        last_send_time = current_time
-                    
-                    output_queue.task_done()
-                except Exception as e:
-                    logger.error(f"Error in output sender: {e}", exc_info=True)
-        
-        # Start output sender task
-        output_task = asyncio.create_task(send_output_task())
-        
-        # Run pipeline in executor
-        loop = asyncio.get_event_loop()
-        executor_task = None
-        try:
-            executor_task = loop.run_in_executor(None, run_pipeline)
-            
-            # Update task info with executor task atomically
-            with processing_lock:
-                if user_id in user_processing_tasks:
-                    user_processing_tasks[user_id]["executor_task"] = executor_task
-                    user_processing_tasks[user_id]["output_task"] = output_task
-            
-            # Wait for pipeline to complete
-            await executor_task
-        except asyncio.CancelledError:
-            logger.info(f"Pipeline executor task cancelled for user {user_id}")
-            if executor_task and not executor_task.done():
-                executor_task.cancel()
-                try:
-                    await executor_task
-                except asyncio.CancelledError:
-                    pass
-        except Exception as e:
-            logger.exception(f"Error in pipeline execution: {e}")
-            try:
-                await client.send_message(chat_id=chat_id, text=f"{get_text(metadata, 'error_occurred')} {str(e)}")
-            except Exception as e2:
-                logger.error(f"Error sending error message: {e2}")
-        finally:
-            # Always wait for output task to finish (with timeout - increased to 30s for LM processing)
-            try:
-                await asyncio.wait_for(output_task, timeout=30.0)
-            except asyncio.TimeoutError:
-                logger.warning("Timeout waiting for output task, cancelling")
-                output_task.cancel()
-                try:
-                    await asyncio.wait_for(output_task, timeout=5.0)
-                except (asyncio.TimeoutError, asyncio.CancelledError):
-                    pass
-            except asyncio.CancelledError:
-                pass
-        
-        # Only send completion message if not cancelled
-        if not shutdown_flag.is_set():
-            try:
-                await client.send_message(chat_id=chat_id, text=get_text(metadata, "processing_complete"))
-            except Exception as e:
-                logger.debug(f"Error sending completion message: {e}")
-        
-        # Reset context after processing
-        reset_context()
-        
-    except asyncio.CancelledError:
-        logger.info(f"Processing cancelled for user {user_id}")
-        try:
-            await client.send_message(chat_id=chat_id, text=get_text(metadata, "cancel_success"))
-        except Exception as e:
-            logger.debug(f"Error sending cancel message: {e}")
-        # Reset context on cancel
-        reset_context()
-    except Exception as e:
-        logger.exception(f"Error processing Twitter video: {e}")
-        error_text = get_text(metadata, "error_occurred")
-        try:
-            await client.send_message(chat_id=chat_id, text=f"{error_text} {str(e)}")
-        except Exception as e2:
-            logger.error(f"Error sending error message: {e2}")
-        # Reset context on error
-        reset_context()
-    finally:
-        # Always clear processing state in finally block
-        with processing_lock:
-            if user_id in user_processing_tasks:
-                del user_processing_tasks[user_id]
+            status_id = url.split("/status/")[-1].split("?")[0]
+            video_id = f"twitter_{status_id}"
+        except:
+            video_id = "twitter_video"
+    await _process_url_video(url, video_id, user_id, client, message, source="Twitter")
 
 
 async def process_video_file(video_path: str, user_id: int, client: Client, message: Message):
@@ -777,6 +561,7 @@ async def process_video_file(video_path: str, user_id: int, client: Client, mess
         
         args = Args()
         args = apply_config_to_args(args, config)
+        args = _resolve_args_paths(args)
         args.url = ""  # Not a YouTube URL
         args.process_mode = "full"  # Process entire video at once
         args.show_original_translation = show_original
@@ -798,54 +583,41 @@ async def process_video_file(video_path: str, user_id: int, client: Client, mess
             logger.error(f"Error sending processing started message: {e}")
             # Continue anyway
         
-        # Use a queue to send output in real-time
+        # Use a queue to send output in real-time (no builtins.print patching)
         output_queue = queue.Queue()
-        
-        def capture_print(*args, **kwargs):
-            """Capture print calls and queue them for real-time sending"""
-            sep = kwargs.get('sep', ' ')
-            end = kwargs.get('end', '\n')
-            text = sep.join(str(a) for a in args) + end
-            
+
+        def output_callback(text: str):
+            """Thread-safe callback that queues text for async sending."""
             try:
                 output_queue.put_nowait(text)
             except queue.Full:
                 pass
             logger.debug(f"Pipeline output: {text.strip()}")
-        
-        # Monkey-patch print for this execution
-        import builtins
-        original_print = builtins.print
-        
+
         def run_pipeline():
-            """Run pipeline with captured print output and local audio file"""
-            builtins.print = capture_print
+            """Run pipeline with output callback and local audio file."""
             try:
                 from trns.transcription.whisper_transcriber import WhisperTranscriber
                 from trns.transcription.language_model import LMProcessor
                 from datetime import datetime
-                
-                # Initialize transcriber
+                import time
+
                 transcriber = WhisperTranscriber(
                     model_size=args.whisper_model,
                     use_faster_whisper=args.use_faster_whisper,
                     shutdown_flag=lambda: shutdown_flag.is_set()
                 )
-                
+
                 if shutdown_flag.is_set():
                     return
-                
-                # Detect language (silently)
+
                 detected_language, lang_prob = transcriber._detect_language(audio_path)
-                
+
                 if shutdown_flag.is_set():
                     return
-                
-                # Get transcription model
+
                 model = transcriber._get_transcription_model(detected_language)
-                
-                # Transcribe (silently) - using beam_size=3 for balance between speed and accuracy
-                import time
+
                 transcription_start = time.time()
                 if transcriber.use_faster_whisper:
                     segments, info = model.transcribe(audio_path, beam_size=3)
@@ -874,37 +646,27 @@ async def process_video_file(video_path: str, user_id: int, client: Client, mess
                         final_prob = 1.0
                     detected_language = final_language
                     language_prob = final_prob
-                
+
                 if shutdown_flag.is_set():
                     return
-                
+
                 transcription_time = time.time() - transcription_start
                 logger.info(f"[PERF] Whisper transcription completed in {transcription_time:.1f}s")
-                
-                # Translate
+
                 if text.strip():
                     if detected_language != 'ru':
                         translated_text = transcriber.translate_to_russian(text, detected_language)
                     else:
                         translated_text = text
-                    
-                    # Format output based on user setting
-                    # If show_original_translation is ON and language is not Russian: show both
-                    # Otherwise: show Russian only
+
                     if show_transcription:
                         if show_original and detected_language != 'ru':
-                            output_text = f"[{detected_language}] {text}\n[RU] {translated_text}"
+                            output_callback(f"[{detected_language}] {text}\n[RU] {translated_text}")
                         else:
-                            output_text = translated_text
-                        
-                        # Output without timestamp
-                        print(output_text)
-                    
-                    # Process through LM if enabled
-                    logger.info(f"[LM] Checking LM config: has lm_output_mode={hasattr(args, 'lm_output_mode')}, mode={getattr(args, 'lm_output_mode', 'NOT SET')}")
+                            output_callback(translated_text)
+
                     if hasattr(args, 'lm_output_mode') and args.lm_output_mode != "transcriptions-only":
                         try:
-                            logger.info(f"[LM] Starting LM processing with mode: {args.lm_output_mode}")
                             lm_start = time.time()
                             lm_processor = LMProcessor(
                                 api_key_file=getattr(args, 'lm_api_key_file', 'api_key.txt'),
@@ -916,9 +678,10 @@ async def process_video_file(video_path: str, user_id: int, client: Client, mess
                                 context=getattr(args, 'context', ''),
                                 shutdown_flag=lambda: shutdown_flag.is_set(),
                                 use_bilingual=show_original,
-                                detected_language=detected_language
+                                detected_language=detected_language,
+                                metadata_path=getattr(args, 'metadata_path', 'metadata.json')
                             )
-                            
+
                             transcription_data = [{
                                 'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                                 'text': text,
@@ -927,47 +690,33 @@ async def process_video_file(video_path: str, user_id: int, client: Client, mess
                                 'language': detected_language,
                                 'language_prob': language_prob
                             }]
-                            
+
                             if not shutdown_flag.is_set():
-                                logger.info("[LM] Calling process_transcription_window...")
                                 report = lm_processor.process_transcription_window(transcription_data)
-                                logger.info(f"[LM] Report generated: {bool(report)}, length: {len(report) if report else 0}")
                                 if report:
-                                    # Send LM Report label as separate message
-                                    logger.info(f"[LM] Sending report to user via print()")
                                     lm_label = get_text(metadata, 'lm_report_label')
-                                    logger.info(f"[LM] Label text: {lm_label}")
-                                    print(f"\n{lm_label}")
-                                    
-                                    # Handle bilingual report (tuple) or Russian-only (string)
+                                    output_callback(f"\n{lm_label}")
                                     if isinstance(report, tuple) and len(report) == 2:
                                         original_text, russian_text = report
-                                        logger.info(f"[LM] Printing bilingual report")
-                                        print(f"{original_text}\n")
-                                        print(f"{russian_text}\n")
+                                        output_callback(f"{original_text}\n")
+                                        output_callback(f"{russian_text}\n")
                                     else:
-                                        logger.info(f"[LM] Printing report (first 100 chars): {str(report)[:100]}...")
-                                        print(report)
-                                    logger.info("[LM] Report printed successfully")
-                                else:
-                                    logger.warning("[LM] No report generated from LM processor")
-                            else:
-                                logger.info("[LM] Shutdown flag set, skipping report generation")
+                                        output_callback(str(report))
                             lm_time = time.time() - lm_start
                             logger.info(f"[PERF] LM processing completed in {lm_time:.1f}s")
                         except Exception as e:
                             logger.exception(f"LM processing error: {e}")
-                            print(f"LM processing error: {e}")
-                
+                            output_callback(f"LM processing error: {e}")
+
                 # Clean up audio file
                 try:
                     if os.path.exists(audio_path):
                         os.remove(audio_path)
                 except Exception as e:
                     logger.debug(f"Error cleaning up audio file: {e}")
-                
+
                 logger.info("Transcription complete!")
-                
+
             except Exception as e:
                 logger.exception(f"Error in pipeline: {e}")
                 try:
@@ -975,21 +724,19 @@ async def process_video_file(video_path: str, user_id: int, client: Client, mess
                 except:
                     pass
             finally:
-                # Restore original print
-                builtins.print = original_print
-                # Signal end of output
                 try:
                     output_queue.put_nowait(None)  # None signals end
                 except:
                     pass
-        
+
         # Async task to consume output queue and send to Telegram in real-time
         async def send_output_task():
             """Send output from queue to Telegram in real-time"""
+            import time as _time
             buffer = ""
             last_send_time = 0
-            send_interval = 2.0  # Send every 2 seconds or immediately for transcriptions
-            
+            send_interval = 2.0
+
             while True:
                 try:
                     try:
@@ -1000,48 +747,47 @@ async def process_video_file(video_path: str, user_id: int, client: Client, mess
                                 await send_text_to_telegram(client, chat_id, buffer)
                             break
                         continue
-                    
+
                     if text is None:
                         if buffer.strip():
                             await send_text_to_telegram(client, chat_id, buffer)
                         break
-                    
+
                     buffer += text
-                    
                     is_transcription = '[' in text and ']' in text
-                    
-                    import time
-                    current_time = time.time()
+                    current_time = _time.time()
                     should_send = (
-                        is_transcription or 
-                        (current_time - last_send_time >= send_interval and buffer.strip())
+                        is_transcription
+                        or (current_time - last_send_time >= send_interval and buffer.strip())
                     )
-                    
+
                     if should_send and buffer.strip():
                         await send_text_to_telegram(client, chat_id, buffer)
                         buffer = ""
                         last_send_time = current_time
-                    
+
                     output_queue.task_done()
                 except Exception as e:
                     logger.error(f"Error in output sender: {e}", exc_info=True)
-        
-        # Start output sender task
+
+        # Send processing started message
+        try:
+            await client.send_message(chat_id=chat_id, text=get_text(metadata, "processing_started"))
+        except Exception as e:
+            logger.error(f"Error sending processing started message: {e}")
+
         output_task = asyncio.create_task(send_output_task())
-        
-        # Run pipeline in executor
+
         loop = asyncio.get_event_loop()
         executor_task = None
         try:
             executor_task = loop.run_in_executor(None, run_pipeline)
-            
-            # Update task info with executor task atomically
+
             with processing_lock:
                 if user_id in user_processing_tasks:
                     user_processing_tasks[user_id]["executor_task"] = executor_task
                     user_processing_tasks[user_id]["output_task"] = output_task
-            
-            # Wait for pipeline to complete
+
             await executor_task
         except asyncio.CancelledError:
             logger.info(f"Pipeline executor task cancelled for user {user_id}")
@@ -1058,7 +804,6 @@ async def process_video_file(video_path: str, user_id: int, client: Client, mess
             except Exception as e2:
                 logger.error(f"Error sending error message: {e2}")
         finally:
-            # Always wait for output task to finish (with timeout - increased to 30s for LM processing)
             try:
                 await asyncio.wait_for(output_task, timeout=30.0)
             except asyncio.TimeoutError:
