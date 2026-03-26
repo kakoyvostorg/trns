@@ -13,7 +13,7 @@ Thank you for your interest in contributing to TRNS! This document provides guid
 
 ### Reporting Bugs
 
-1. Check if the bug has already been reported in [Issues](https://github.com/yourusername/trns/issues)
+1. Check if the bug has already been reported in [Issues](https://github.com/kakoyvostorg/trns/issues)
 2. If not, create a new issue with:
    - Clear title and description
    - Steps to reproduce
@@ -48,7 +48,7 @@ Thank you for your interest in contributing to TRNS! This document provides guid
 
 1. Clone your fork:
    ```bash
-   git clone https://github.com/yourusername/trns.git
+   git clone https://github.com/kakoyvostorg/trns.git
    cd trns
    ```
 

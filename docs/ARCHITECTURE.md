@@ -124,15 +124,17 @@ The core orchestrator. ~1300 lines covering:
 - `get_current_token()` / `decrement_daily_capacity()` — token rotation + capacity
 - `load_metadata()` / `save_metadata()` — thread-safe metadata I/O
 - `get_text(metadata, key)` — localized string lookup from `metadata.json`
-- User settings (per-user preferences stored in `config.json`)
+- User settings (per-user preferences stored in `user_settings.json`)
 
 ## Configuration Priority
 
 ```
-CLI flag (explicit) > config.json value > default
+config.json value > CLI default
 ```
 
 Exception: `--url` on command line always wins over `config.json` URL.
+
+Note: `config.json` values are applied on top of CLI defaults. To override a config value from the CLI, pass the flag explicitly (e.g., `--whisper-model large`).
 
 All relative file paths (`api_key.txt`, `prompt.md`, etc.) resolve against `TRNS_HOME` environment variable, which defaults to the current working directory.
 

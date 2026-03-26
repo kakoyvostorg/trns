@@ -20,7 +20,7 @@ pip install trns
 ### From Source
 
 ```bash
-git clone https://github.com/yourusername/trns.git
+git clone https://github.com/kakoyvostorg/trns.git
 cd trns
 pip install -e .
 ```
@@ -158,7 +158,7 @@ See [DEPLOYMENT.md](DEPLOYMENT.md) for cloud deployment instructions.
 ### Authentication Issues
 
 - Verify `AUTH_KEY` or `key.txt` matches what you're sending
-- Check `ALLOWED_USER_IDS` or `allowed_ids.txt` includes your user ID
+- Check `config.json` `allowed_user_ids` field includes your user ID
 - Your Telegram user ID can be found by messaging [@userinfobot](https://t.me/userinfobot)
 
 ### Transcription Errors

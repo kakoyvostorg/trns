@@ -8,7 +8,7 @@ All filesystem operations use pytest's tmp_path to stay isolated.
 import json
 import pytest
 from unittest.mock import patch
-from datetime import date, timezone
+from datetime import date, datetime, timezone
 
 from trns.bot.utils import (
     get_text,
@@ -202,7 +202,7 @@ class TestDailyCapacity:
 
     def test_returns_full_capacity_on_new_day(self, tmp_path):
         path = self._write_metadata(tmp_path, 500, "2000-01-01")
-        today = date.today().isoformat()
+        today = datetime.now(timezone.utc).date().isoformat()
         result = get_daily_capacity(path)
         assert result == DAILY_CAPACITY
         # File was updated
@@ -210,12 +210,12 @@ class TestDailyCapacity:
         assert data["last_capacity_date"] == today
 
     def test_returns_existing_capacity_same_day(self, tmp_path):
-        today = date.today().isoformat()
+        today = datetime.now(timezone.utc).date().isoformat()
         path = self._write_metadata(tmp_path, 300, today)
         assert get_daily_capacity(path) == 300
 
     def test_decrement_reduces_capacity(self, tmp_path):
-        today = date.today().isoformat()
+        today = datetime.now(timezone.utc).date().isoformat()
         path = self._write_metadata(tmp_path, 10, today)
         result = decrement_daily_capacity(path)
         assert result is True
@@ -223,14 +223,14 @@ class TestDailyCapacity:
         assert data["daily_capacity"] == 9
 
     def test_decrement_returns_true_at_last_capacity(self, tmp_path):
-        today = date.today().isoformat()
+        today = datetime.now(timezone.utc).date().isoformat()
         path = self._write_metadata(tmp_path, 1, today)
         result = decrement_daily_capacity(path)
         # After decrement capacity is 0, returns True (last request succeeds)
         assert result is True
 
     def test_decrement_returns_false_when_already_zero(self, tmp_path):
-        today = date.today().isoformat()
+        today = datetime.now(timezone.utc).date().isoformat()
         path = self._write_metadata(tmp_path, 0, today)
         result = decrement_daily_capacity(path)
         assert result is False
@@ -242,25 +242,25 @@ class TestDailyCapacity:
         assert result is True
 
     def test_check_capacity_at_start_no_warn_when_high(self, tmp_path):
-        today = date.today().isoformat()
+        today = datetime.now(timezone.utc).date().isoformat()
         path = self._write_metadata(tmp_path, 500, today)
         capacity, should_warn = check_capacity_at_start(path)
         assert capacity == 500
         assert should_warn is False
 
     def test_check_capacity_at_start_warns_when_low(self, tmp_path):
-        today = date.today().isoformat()
+        today = datetime.now(timezone.utc).date().isoformat()
         path = self._write_metadata(tmp_path, WARNING_THRESHOLD - 1, today)
         capacity, should_warn = check_capacity_at_start(path)
         assert should_warn is True
 
     def test_check_token_warning_true_below_threshold(self, tmp_path):
-        today = date.today().isoformat()
+        today = datetime.now(timezone.utc).date().isoformat()
         path = self._write_metadata(tmp_path, 10, today)
         assert check_token_warning(path) is True
 
     def test_check_token_warning_false_above_threshold(self, tmp_path):
-        today = date.today().isoformat()
+        today = datetime.now(timezone.utc).date().isoformat()
         path = self._write_metadata(tmp_path, 100, today)
         assert check_token_warning(path) is False
 

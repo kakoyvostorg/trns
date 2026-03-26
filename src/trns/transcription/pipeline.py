@@ -11,24 +11,32 @@ import threading
 import queue
 import re
 import os
+import json
 from datetime import datetime
 from typing import Optional, List, Dict, Callable
 import logging
 
 from .subtitle_extractor import YouTubeSubtitleExtractor
-from .whisper_transcriber import WhisperTranscriber
+from .whisper_transcriber import WhisperTranscriber, _is_local_file
 from .language_model import LMProcessor
 
 logger = logging.getLogger(__name__)
 
 
 def extract_video_id(url_or_id: str) -> str:
-    """Extract video ID from YouTube URL"""
+    """Extract video ID from YouTube URL, or return local file path / URL as-is."""
+    if _is_local_file(url_or_id):
+        return url_or_id
     if "youtube.com" in url_or_id or "youtu.be" in url_or_id:
         if "v=" in url_or_id:
-            return url_or_id.split("v=")[-1].split("&")[0]
+            result = url_or_id.split("v=")[-1].split("&")[0]
+            return result
         elif "youtu.be/" in url_or_id:
-            return url_or_id.split("youtu.be/")[-1].split("?")[0]
+            result = url_or_id.split("youtu.be/")[-1].split("?")[0]
+            return result
+        elif "/shorts/" in url_or_id:
+            result = url_or_id.split("/shorts/")[-1].split("?")[0]
+            return result
     return url_or_id
 
 
@@ -124,12 +132,15 @@ class TranscriptionPipeline:
 
     def initialize_components(self):
         """Initialize subtitle extractor, whisper transcriber, and LM processor"""
-        # Initialize subtitle extractor if needed
-        if self.args.method in ["auto", "subtitles"]:
+        # Local files always use whisper, no subtitles available
+        is_local = _is_local_file(self.video_id)
+
+        # Initialize subtitle extractor if needed (skip for local files)
+        if not is_local and self.args.method in ["auto", "subtitles"]:
             self.subtitle_extractor = YouTubeSubtitleExtractor(self.video_id)
             logger.info("Checking for available subtitles...")
             available, languages = self.subtitle_extractor.check_subtitles_available()
-            
+
             if available:
                 logger.info(f"✓ Subtitles available in: {', '.join(languages)}")
                 if self.args.method == "subtitles":
@@ -148,10 +159,12 @@ class TranscriptionPipeline:
                     self.use_whisper = True
         else:
             self.use_subtitles = False
-        
-        # Initialize whisper transcriber if needed
-        if self.args.method in ["auto", "whisper"]:
-            if not self.use_subtitles or self.args.method == "whisper":
+
+        # Initialize whisper transcriber if needed.
+        # Local files always need whisper (subtitles aren't available for them).
+        need_whisper = is_local or self.args.method in ["auto", "whisper"]
+        if need_whisper:
+            if not self.use_subtitles or self.args.method == "whisper" or is_local:
                 try:
                     self.whisper_transcriber = WhisperTranscriber(
                         model_size=self.args.whisper_model,
@@ -162,7 +175,7 @@ class TranscriptionPipeline:
                     self.use_whisper = True
                 except Exception as e:
                     logger.error(f"Failed to initialize Whisper: {e}")
-                    if self.args.method == "whisper":
+                    if self.args.method == "whisper" or is_local:
                         raise RuntimeError(f"Failed to initialize Whisper: {e}")
                     elif self.args.method == "auto":
                         logger.warning("Falling back to subtitle extraction only")
@@ -418,15 +431,15 @@ class TranscriptionPipeline:
             
             # Use Whisper with appropriate model based on language
             model = self.whisper_transcriber._get_transcription_model(detected_language)
-            model_size = "tiny" if detected_language == "en" else "small"
-            logger.info(f"Using {model_size} model for {detected_language} transcription")
+            logger.info(f"Using {self.args.whisper_model} model for {detected_language} transcription")
             
             if self.whisper_transcriber.use_faster_whisper:
                 segments, info = model.transcribe(audio_path, beam_size=5)
                 
                 # Collect segments with progress bar
                 all_segments = []
-                pbar = tqdm(desc="Transcribing (Whisper)", unit="segment", dynamic_ncols=True)
+                pbar = tqdm(desc="Transcribing (Whisper)", unit="segment",
+                           dynamic_ncols=True, leave=False, file=sys.stderr)
                 try:
                     for segment in segments:
                         # Check shutdown flag during transcription
@@ -435,7 +448,7 @@ class TranscriptionPipeline:
                             break
                         all_segments.append(segment)
                         pbar.update(1)
-                        pbar.set_postfix({"text": segment.text[:50] + "..." if len(segment.text) > 50 else segment.text})
+                        pbar.set_postfix_str(segment.text[:50].strip())
                 finally:
                     pbar.close()
                 
@@ -750,8 +763,9 @@ class TranscriptionPipeline:
         next_extract_time = 0
         first_chunk = True
         consecutive_failures = 0
+        should_use_whisper = False
         MAX_CONSECUTIVE_FAILURES = 5  # Stop after 5 consecutive failures
-        
+
         try:
             while not self.shutdown_flag():
                 # Check shutdown_flag at the start of each iteration

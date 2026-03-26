@@ -60,14 +60,23 @@ def get_shutdown_flag():
     return shutdown_flag
 
 
+def _resolve_trns_path(path: str) -> str:
+    """Resolve a relative path against TRNS_HOME."""
+    if path and not os.path.isabs(path):
+        trns_home = os.path.abspath(os.environ.get("TRNS_HOME", os.getcwd()))
+        return os.path.join(trns_home, path)
+    return path
+
+
 def create_default_config(config_path: str = "config.json"):
     """Create a default configuration JSON file with all parameters"""
+    config_path = _resolve_trns_path(config_path)
     default_config = {
         "url": "",
         "method": "auto",
         "interval": 30,
         "language": "en",
-        "whisper_model": "tiny",
+        "whisper_model": "auto",
         "use_faster_whisper": True,
         "translation_output": "russian-only",
         "save_transcript": None,
@@ -92,6 +101,7 @@ def create_default_config(config_path: str = "config.json"):
 
 def load_config(config_path: str = "config.json"):
     """Load configuration from JSON file. Returns None if file doesn't exist."""
+    config_path = _resolve_trns_path(config_path)
     if not os.path.exists(config_path):
         return None
     
@@ -107,11 +117,19 @@ def load_config(config_path: str = "config.json"):
         return None
 
 
-def apply_config_to_args(args, config):
-    """Apply configuration values to args, respecting 0 = default logic"""
+def apply_config_to_args(args, config, explicit_cli_keys=None):
+    """Apply configuration values to args.
+
+    Priority: explicit CLI flag > config.json value > parser default.
+    ``explicit_cli_keys`` is the set of arg dest names the user actually typed
+    on the command line; those are never overwritten by config.
+    """
     if config is None:
         return args
-    
+
+    if explicit_cli_keys is None:
+        explicit_cli_keys = set()
+
     # Map config keys to argument names (handle dashes vs underscores)
     config_map = {
         "method": "method",
@@ -133,33 +151,37 @@ def apply_config_to_args(args, config):
         "debug": "debug",
         "context": "context"
     }
-    
+
     # Numeric fields where 0 means use default
     numeric_fields = {"interval", "overlap", "lm_window_seconds", "lm_interval"}
-    
-    # Apply config values (0 means use default, so skip those)
+
+    # Apply config values — but never overwrite an explicit CLI flag
     for config_key, arg_name in config_map.items():
+        # Skip if the user explicitly set this on the command line
+        if arg_name in explicit_cli_keys:
+            continue
+
         if config_key in config:
             value = config[config_key]
-            
+
             # For numeric fields, 0 means use default
             if config_key in numeric_fields and isinstance(value, (int, float)) and value == 0:
                 continue
-            
+
             # For string fields, empty string means use default (except context and save_transcript)
             if isinstance(value, str) and value == "" and config_key not in {"context", "save_transcript", "url"}:
                 continue
-            
+
             # For None values, skip (means use default) except for save_transcript
             if value is None and config_key != "save_transcript":
                 continue
-            
+
             # Handle boolean values
             if config_key in {"use_faster_whisper", "debug"}:
                 setattr(args, arg_name, bool(value))
             else:
                 setattr(args, arg_name, value)
-    
+
     return args
 
 
@@ -217,15 +239,23 @@ Examples:
     )
     parser.add_argument(
         "--whisper-model",
-        default="tiny",
-        choices=["tiny", "base", "small", "medium", "large"],
-        help="Whisper model size (default: tiny). Larger models are more accurate but slower."
+        default="auto",
+        choices=["auto", "tiny", "base", "small", "medium", "large"],
+        help="Whisper model size (default: auto). Auto selects tiny for English, small for others. Explicit values override auto-selection."
     )
-    parser.add_argument(
+    faster_whisper_group = parser.add_mutually_exclusive_group()
+    faster_whisper_group.add_argument(
         "--use-faster-whisper",
         action="store_true",
+        dest="use_faster_whisper",
         default=True,
-        help="Use faster-whisper library (default: True, faster and more efficient)"
+        help="Use faster-whisper library (default, faster and more efficient)"
+    )
+    faster_whisper_group.add_argument(
+        "--no-faster-whisper",
+        action="store_false",
+        dest="use_faster_whisper",
+        help="Use original openai-whisper library instead of faster-whisper"
     )
     parser.add_argument(
         "--translation-output",
@@ -307,8 +337,43 @@ Examples:
     )
     
     args = parser.parse_args()
-    
-    # Load configuration from JSON file (has priority over CLI args)
+
+    # Determine which args the user explicitly passed on the CLI.
+    # We re-parse with SUPPRESS so only explicit flags appear.
+    _sentinel_parser = argparse.ArgumentParser(parents=[], add_help=False)
+    # Copy all actions except help from the real parser
+    for action in parser._actions:
+        if action.option_strings == ['-h', '--help']:
+            continue
+        # Clone the action into the sentinel parser (same flags, but default=SUPPRESS)
+        try:
+            kwargs = {
+                'dest': action.dest,
+                'default': argparse.SUPPRESS,
+            }
+            if hasattr(action, 'type') and action.type is not None:
+                kwargs['type'] = action.type
+            if hasattr(action, 'choices') and action.choices is not None:
+                kwargs['choices'] = list(action.choices)
+            if hasattr(action, 'nargs') and action.nargs is not None:
+                kwargs['nargs'] = action.nargs
+
+            if isinstance(action, argparse._StoreTrueAction):
+                if action.option_strings:
+                    _sentinel_parser.add_argument(*action.option_strings, action='store_true', **kwargs)
+            elif isinstance(action, argparse._StoreFalseAction):
+                if action.option_strings:
+                    _sentinel_parser.add_argument(*action.option_strings, action='store_false', **kwargs)
+            elif action.option_strings:
+                _sentinel_parser.add_argument(*action.option_strings, **kwargs)
+            else:
+                _sentinel_parser.add_argument(action.dest, **kwargs)
+        except Exception:
+            pass
+    _explicit_args = vars(_sentinel_parser.parse_known_args()[0])
+    explicit_cli_keys = set(_explicit_args.keys())
+
+    # Load configuration from JSON file
     config = load_config(args.config)
     if config is None:
         # Create default config file if it doesn't exist
@@ -316,18 +381,15 @@ Examples:
         create_default_config(args.config)
         logger.info(f"Default configuration created at {args.config}. You can edit it and run again.")
         config = load_config(args.config)
-    
-    # Store CLI URL before applying config (CLI URL has priority)
-    cli_url = args.url
-    
-    # Apply config to args (config overrides CLI defaults)
+
+    # Apply config to args: config fills in defaults, but explicit CLI flags win
     if config:
-        args = apply_config_to_args(args, config)
+        args = apply_config_to_args(args, config, explicit_cli_keys)
         # Handle URL: CLI takes priority, then config
-        if cli_url:
-            args.url = cli_url  # CLI URL has priority
-        elif not args.url and config.get("url"):
-            args.url = config["url"]  # Use config URL only if CLI didn't provide one
+        if "url" in explicit_cli_keys and args.url:
+            pass  # CLI URL wins
+        elif config.get("url"):
+            args.url = config["url"]
     
     # Resolve TRNS_HOME: base directory for all relative resource paths
     trns_home = os.path.abspath(os.environ.get("TRNS_HOME", os.getcwd()))
@@ -392,14 +454,14 @@ Examples:
     
     # Extract video ID (URL can come from CLI or config)
     if not args.url:
-        logger.error("YouTube URL or video ID is required. Provide it via --url argument or in config.json")
+        logger.error("URL, video ID, or local file path is required. Provide it via --url argument or in config.json")
         sys.exit(1)
-    
+
     try:
         video_id = extract_video_id(args.url)
         logger.info(f"Video ID: {video_id}")
     except Exception as e:
-        logger.error(f"Invalid YouTube URL or video ID: {e}")
+        logger.error(f"Invalid input (URL, video ID, or file path): {e}")
         sys.exit(1)
     
     # Create and run pipeline

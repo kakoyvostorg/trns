@@ -4,13 +4,13 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "trns"
-version = "0.1.1"
+version = "0.2.0"
 description = "Transcription and summarization tool for YouTube, Twitter/X.com videos, and local files with automatic translation and language model processing"
 readme = "README.md"
 requires-python = ">=3.8"
 license = "MIT"
 authors = [
-    {name = "Misha S.", email = "862andfurther@gmai.com"}
+    {name = "Misha S.", email = "862andfurther@gmail.com"}
 ]
 keywords = ["transcription", "whisper", "youtube", "telegram", "translation", "language-model"]
 classifiers = [
@@ -44,6 +44,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+whisper = [
+    "openai-whisper>=20231117",
+]
 dev = [
     "pytest>=7.0.0",
     "ruff>=0.1.0",
@@ -75,8 +78,9 @@ select = ["E", "F", "I", "N", "W"]
 ignore = ["E501"]
 
 [tool.pytest.ini_options]
+addopts = "-m 'not integration'"
 markers = [
-    "integration: tests that require network access and real model inference (deselect with '-m not integration')",
+    "integration: tests that require network access and real model inference (run with 'pytest -m integration')",
 ]
 
 [tool.mypy]

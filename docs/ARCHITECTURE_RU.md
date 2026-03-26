@@ -204,7 +204,7 @@ TRNS — система транскрипции и обработки язык�
 - `BOT_TOKEN`: Токен Telegram-бота
 - `AUTH_KEY`: Ключ аутентификации
 - `OPENROUTER_API_KEY`: API ключ для обработки LM
-- `ALLOWED_USER_IDS`: ID пользователей через запятую
+- Допущенные пользователи хранятся в `config.json` (поле `allowed_user_ids`)
 - `HOST`, `PORT`: Конфигурация сервера
 - `CONFIG_PATH`, `METADATA_PATH`: Пути к файлам
 
@@ -213,7 +213,7 @@ TRNS — система транскрипции и обработки язык�
 - `bot_key.txt`: Токен бота
 - `key.txt`: Ключ аутентификации
 - `api_key.txt`: API ключи (по одному на строку)
-- `allowed_ids.txt`: ID пользователей (по одному на строку)
+- `config.json`: содержит `allowed_user_ids` (список ID пользователей)
 - `config.json`: Конфигурация приложения
 - `metadata.json`: Локализация
 

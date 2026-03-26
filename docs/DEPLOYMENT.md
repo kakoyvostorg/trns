@@ -130,7 +130,7 @@ For more control, deploy to a VM:
 
 4. **Clone and install:**
    ```bash
-   git clone https://github.com/yourusername/trns.git
+   git clone https://github.com/kakoyvostorg/trns.git
    cd trns
    pip3 install -e .
    ```
@@ -151,9 +151,14 @@ For more control, deploy to a VM:
    User=ubuntu
    WorkingDirectory=/home/ubuntu/trns
    Environment="BOT_TOKEN=your_token"
+   Environment="TELEGRAM_API_ID=your_api_id"
+   Environment="TELEGRAM_API_HASH=your_api_hash"
    Environment="AUTH_KEY=your_key"
    Environment="OPENROUTER_API_KEY=your_key"
-   Environment="ALLOWED_USER_IDS=123456789"
+   # Webhook security (strongly recommended):
+   Environment="WEBHOOK_SECRET=your_random_secret"
+   Environment="ADMIN_TOKEN=your_admin_token"
+   # Note: allowed user IDs are managed via config.json (allowed_user_ids field)
    ExecStart=/usr/bin/python3 -m trns.bot.server
    Restart=always
    
@@ -203,7 +208,11 @@ For more control, deploy to a VM:
    BOT_TOKEN=your_token
    AUTH_KEY=your_key
    OPENROUTER_API_KEY=your_key
-   ALLOWED_USER_IDS=123456789
+   # Note: allowed user IDs are managed via config.json (allowed_user_ids field)
+
+   # Webhook security (strongly recommended for internet-facing deployments):
+   WEBHOOK_SECRET=your_random_secret   # Validates X-Telegram-Bot-Api-Secret-Token on incoming updates
+   ADMIN_TOKEN=your_admin_token        # Protects /set_webhook and /webhook_info with Bearer auth
    ```
 
 2. **Run:**
@@ -220,7 +229,8 @@ docker run -d \
   -e BOT_TOKEN=your_token \
   -e AUTH_KEY=your_key \
   -e OPENROUTER_API_KEY=your_key \
-  -e ALLOWED_USER_IDS=123456789 \
+  # Note: allowed user IDs are managed via config.json (allowed_user_ids field)
+
   -v $(pwd)/config:/app/config \
   trns:latest
 ```
@@ -289,7 +299,7 @@ Use Yandex Application Load Balancer for multiple VMs or scale manually.
 1. **Use environment variables** instead of files for secrets
 2. **Use Yandex Lockbox** for production secrets
 3. **Enable HTTPS** (use Yandex Application Load Balancer or Cloudflare)
-4. **Restrict allowed user IDs** in `ALLOWED_USER_IDS`
+4. **Restrict allowed user IDs** in `config.json` (`allowed_user_ids` field)
 5. **Regular updates:** Keep dependencies updated
 6. **Monitor logs** for suspicious activity
 

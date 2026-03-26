@@ -6,11 +6,8 @@ This bot provides Telegram interface for the YouTube transcription functionality
 using FastAPI webhooks with Pyrogram MTProto client.
 """
 
-import io
-import json
 import logging
 import os
-import sys
 from contextlib import asynccontextmanager
 from typing import Optional
 
@@ -18,10 +15,9 @@ from fastapi import FastAPI, Request, Response
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from pyrogram import Client
-from pyrogram.types import ReplyKeyboardMarkup, KeyboardButton, Update
-import pyrogram.raw
+from pyrogram.types import ReplyKeyboardMarkup, KeyboardButton
 
-from trns.bot.utils import load_metadata, get_text, get_user_setting
+from trns.bot.utils import load_metadata, get_text, get_user_setting, _resolve_path
 
 # Configure logging
 logging.basicConfig(
@@ -35,6 +31,16 @@ bot_client = None
 bot_metadata = None
 bot_keyboard = None
 
+# Webhook secret for validating incoming Telegram requests.
+# Set via WEBHOOK_SECRET env var; when configured, every POST /webhook
+# must carry a matching X-Telegram-Bot-Api-Secret-Token header.
+_webhook_secret: Optional[str] = os.getenv("WEBHOOK_SECRET")
+
+# Admin token for management endpoints (/set_webhook, /webhook_info).
+# Set via ADMIN_TOKEN env var; when configured, those endpoints require
+# an Authorization: Bearer <token> header.
+_admin_token: Optional[str] = os.getenv("ADMIN_TOKEN")
+
 
 def get_bot_token(bot_key_path: str = "bot_key.txt") -> str:
     """Load bot token from environment variable or file"""
@@ -44,6 +50,7 @@ def get_bot_token(bot_key_path: str = "bot_key.txt") -> str:
         return token.strip()
     
     # Fallback to file
+    bot_key_path = _resolve_path(bot_key_path)
     try:
         with open(bot_key_path, 'r', encoding='utf-8') as f:
             token = f.read().strip()
@@ -286,22 +293,42 @@ app = FastAPI(
 
 @app.get("/health")
 async def health_check():
-    """Health check endpoint"""
-    return {"status": "healthy", "bot_initialized": bot_client is not None}
+    """Health check endpoint.
+
+    Returns 200 + healthy only when the bot is fully initialized.
+    Returns 503 + degraded when the process is up but the bot is not ready.
+    """
+    if bot_client is None:
+        return JSONResponse(
+            status_code=503,
+            content={"status": "degraded", "bot_initialized": False}
+        )
+    return {"status": "healthy", "bot_initialized": True}
 
 
 @app.post("/webhook")
 async def webhook(request: Request):
-    """Webhook endpoint for receiving Telegram updates"""
+    """Webhook endpoint for receiving Telegram updates.
+
+    When WEBHOOK_SECRET is set, the request must include a matching
+    X-Telegram-Bot-Api-Secret-Token header (standard Telegram mechanism).
+    """
     global bot_client
-    
+
+    # Validate webhook secret when configured
+    if _webhook_secret:
+        incoming_token = request.headers.get("X-Telegram-Bot-Api-Secret-Token", "")
+        if incoming_token != _webhook_secret:
+            logger.warning("Rejected webhook request: invalid or missing secret token")
+            return JSONResponse(status_code=403, content={"error": "Forbidden"})
+
     if bot_client is None:
         logger.error("Bot client not initialized")
         return JSONResponse(
             status_code=503,
             content={"error": "Bot client not initialized"}
         )
-    
+
     try:
         # Parse update from request (Bot API format)
         update_data = await request.json()
@@ -327,16 +354,34 @@ async def webhook(request: Request):
         return Response(status_code=200)  # Return 200 to prevent Telegram retries
 
 
+def _check_admin_auth(request: Request) -> Optional[JSONResponse]:
+    """Validate admin Bearer token when ADMIN_TOKEN is configured.
+
+    Returns a 403 JSONResponse if the token is wrong/missing, or None if OK.
+    """
+    if not _admin_token:
+        return None
+    auth_header = request.headers.get("Authorization", "")
+    if auth_header == f"Bearer {_admin_token}":
+        return None
+    logger.warning("Rejected admin request: invalid or missing Authorization header")
+    return JSONResponse(status_code=403, content={"error": "Forbidden"})
+
+
 class WebhookRequest(BaseModel):
     webhook_url: str
-    secret_token: str = None
+    secret_token: Optional[str] = None
 
 
 @app.post("/set_webhook")
-async def set_webhook(request: WebhookRequest):
-    """Set webhook URL for Telegram bot"""
+async def set_webhook(body: WebhookRequest, request: Request):
+    """Set webhook URL for Telegram bot (requires ADMIN_TOKEN when configured)."""
     global bot_client
-    
+
+    denied = _check_admin_auth(request)
+    if denied:
+        return denied
+
     if bot_client is None:
         return JSONResponse(
             status_code=503,
@@ -349,17 +394,17 @@ async def set_webhook(request: WebhookRequest):
         bot_token = get_bot_token()
         telegram_api_url = f"https://api.telegram.org/bot{bot_token}/setWebhook"
         
-        payload = {"url": request.webhook_url}
-        if request.secret_token:
-            payload["secret_token"] = request.secret_token
-        
+        payload = {"url": body.webhook_url}
+        if body.secret_token:
+            payload["secret_token"] = body.secret_token
+
         async with aiohttp.ClientSession() as session:
             async with session.post(telegram_api_url, json=payload) as response:
                 result = await response.json()
-                
+
                 if result.get("ok"):
-                    logger.info(f"Webhook set to: {request.webhook_url}")
-                    return {"status": "success", "webhook_url": request.webhook_url}
+                    logger.info(f"Webhook set to: {body.webhook_url}")
+                    return {"status": "success", "webhook_url": body.webhook_url}
                 else:
                     error_msg = result.get("description", "Unknown error")
                     logger.error(f"Failed to set webhook: {error_msg}")
@@ -376,10 +421,14 @@ async def set_webhook(request: WebhookRequest):
 
 
 @app.get("/webhook_info")
-async def get_webhook_info():
-    """Get current webhook information"""
+async def get_webhook_info(request: Request):
+    """Get current webhook information (requires ADMIN_TOKEN when configured)."""
     global bot_client
-    
+
+    denied = _check_admin_auth(request)
+    if denied:
+        return denied
+
     if bot_client is None:
         return JSONResponse(
             status_code=503,

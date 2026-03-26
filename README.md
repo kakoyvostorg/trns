@@ -53,7 +53,7 @@ Then set up a webhook pointing to `https://your-domain/webhook`. See [Setup Guid
 
 ## Configuration
 
-TRNS uses a JSON config file (`config.json`). On first run, a default is created automatically. You can also pass everything via CLI flags — config values override CLI defaults, but an explicit CLI `--url` always wins.
+TRNS uses a JSON config file (`config.json`). On first run, a default is created automatically. You can also pass everything via CLI flags — **explicit CLI flags always win** over config values, which in turn override parser defaults. If you don't pass a flag, the config value is used; if the config doesn't set it either, the built-in default applies.
 
 ### Configuration Reference
 
@@ -65,8 +65,8 @@ Every key in `config.json` maps to a CLI flag. Here's what each one does:
 | `method` | `--method` | `"auto"` \| `"subtitles"` \| `"whisper"` | `"auto"` | **auto**: try YouTube captions first, fall back to Whisper. **subtitles**: captions only (fails if unavailable). **whisper**: always use speech-to-text. |
 | `interval` | `--interval` | integer (seconds) | `30` | Chunk duration for live/chunked processing. Each chunk is this many seconds of audio. |
 | `language` | `--language` | string (ISO 639-1) | `"en"` | Expected language of the video. Used for subtitle extraction and as a hint for Whisper. |
-| `whisper_model` | `--whisper-model` | `"tiny"` \| `"base"` \| `"small"` \| `"medium"` \| `"large"` | `"tiny"` | Whisper model size. Larger = more accurate but slower and uses more RAM. `medium` is a good balance for most use. |
-| `use_faster_whisper` | `--use-faster-whisper` | boolean | `true` | Use the faster-whisper library (CTranslate2 backend). No reason to turn this off. |
+| `whisper_model` | `--whisper-model` | `"auto"` \| `"tiny"` \| `"base"` \| `"small"` \| `"medium"` \| `"large"` | `"auto"` | Whisper model size. `auto` (default) picks tiny for English, small for other languages. Explicit values override auto-selection. Larger = more accurate but slower and uses more RAM. |
+| `use_faster_whisper` | `--use-faster-whisper` / `--no-faster-whisper` | boolean | `true` | Use the faster-whisper library (CTranslate2 backend). Use `--no-faster-whisper` to fall back to openai-whisper. |
 | `translation_output` | `--translation-output` | `"russian-only"` \| `"both"` \| `"original-only"` | `"russian-only"` | What to print for transcription output. **russian-only**: only the Russian translation. **both**: original + Russian. **original-only**: no translation. |
 | `save_transcript` | `--save-transcript` | string (file path) \| `null` | `null` | If set, appends all output to this file. Relative paths resolve against `TRNS_HOME` / CWD. |
 | `overlap` | `--overlap` | integer (seconds) | `2` | Overlap between audio chunks. Prevents words from being cut at chunk boundaries. |
@@ -74,7 +74,7 @@ Every key in `config.json` maps to a CLI flag. Here's what each one does:
 | `lm_window_seconds` | `--lm-window-seconds` | integer (seconds) | `120` | How much transcription context the LLM sees. It gets the last `ceil(window_seconds / interval)` chunks. |
 | `lm_interval` | `--lm-interval` | integer (seconds) | `30` | How often the LLM processes accumulated text. Can differ from `interval`. |
 | `lm_output_mode` | `--lm-output-mode` | `"both"` \| `"transcriptions-only"` \| `"lm-only"` | `"both"` | **both**: print transcriptions AND LLM summaries. **transcriptions-only**: skip LLM entirely. **lm-only**: only show LLM output. |
-| `lm_api_key_file` | `--lm-api-key-file` | string (file path) | `"api_key.txt"` | File containing OpenRouter API key(s), one per line. Multiple keys enable rotation. |
+| `lm_api_key_file` | `--lm-api-key-file` | string (file path) | `"api_key.txt"` | File containing OpenRouter API key. |
 | `lm_prompt_file` | `--lm-prompt-file` | string (file path) | `"prompt.md"` | Prompt template for Russian-language LLM processing. |
 | `lm_model` | `--lm-model` | string | `"google/gemma-3-27b-it:free"` | OpenRouter model identifier. See [openrouter.ai/models](https://openrouter.ai/models) for options. Free models have `:free` suffix. |
 | `debug` | `--debug` | boolean | `false` | **false** (production): logs go to `logs.txt`, stdout shows only transcription/LLM output. **true**: verbose logs go to stderr, useful for troubleshooting. |
@@ -184,9 +184,9 @@ Video URL or file
 | `medium` | 769M | ~2x realtime | Very good | ~5 GB |
 | `large` | 1550M | ~1x realtime | Best | ~10 GB |
 
-### Multi-Token Setup
+### API Key Setup
 
-Put multiple OpenRouter API keys in `api_key.txt` (one per line) for rotation. The system tracks daily capacity in `metadata.json` and rotates to the next key when one is exhausted. Capacity resets at UTC midnight.
+Put your OpenRouter API key in `api_key.txt`. The system tracks daily usage capacity in `metadata.json` and resets it at UTC midnight.
 
 ---
 

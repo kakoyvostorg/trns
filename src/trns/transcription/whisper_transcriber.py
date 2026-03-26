@@ -15,6 +15,13 @@ from typing import Optional, Tuple
 logger = logging.getLogger(__name__)
 
 
+def _is_local_file(path: str) -> bool:
+    """Check if a string is a local file path (not a URL or bare video ID)."""
+    if path.startswith("http://") or path.startswith("https://"):
+        return False
+    return os.path.exists(path)
+
+
 class WhisperTranscriber:
     """
     Transcribes audio using OpenAI Whisper (or faster-whisper for better performance).
@@ -22,19 +29,23 @@ class WhisperTranscriber:
     Extracts audio from YouTube video and processes it in chunks.
     """
     
-    def __init__(self, model_size: str = "base", use_faster_whisper: bool = True, shutdown_flag=None):
+    def __init__(self, model_size: str = "auto", use_faster_whisper: bool = True, shutdown_flag=None):
         """
         Initialize Whisper transcriber.
-        
+
         Args:
-            model_size: Whisper model size (ignored, will be selected dynamically based on language)
+            model_size: Whisper model size. "auto" (default) selects dynamically
+                        (tiny for English, small for other languages).
+                        Explicit values: "tiny", "base", "small", "medium", "large".
             use_faster_whisper: Use faster-whisper library (faster, more efficient)
             shutdown_flag: Optional callable/object to check for shutdown signal
         """
+        self.model_size = model_size
         self.use_faster_whisper = use_faster_whisper
         self.language_detector = None  # Tiny model for quick language detection
         self.tiny_model = None  # Tiny model for English transcription
         self.small_model = None  # Small model for non-English transcription
+        self.explicit_model = None  # User-specified model (when not "auto")
         self.shutdown_flag = shutdown_flag
         # Cache for video info to avoid redundant fetching
         self._video_info_cache = {}  # {video_id: {'info': dict, 'timestamp': float, 'is_live': bool}}
@@ -72,44 +83,72 @@ class WhisperTranscriber:
             pass
 
     def _initialize_model(self):
-        """Initialize the Whisper models (tiny for language detection, tiny/small for transcription)"""
+        """Initialize the Whisper models.
+
+        When model_size is "auto": tiny for language detection + English, small lazy-loaded for others.
+        When model_size is explicit: that model is used for everything (detection + transcription).
+        """
         try:
             if self.use_faster_whisper:
                 try:
                     from faster_whisper import WhisperModel
                     import os
-                    # Optimize for CPU: use all available threads
                     cpu_threads = max(1, os.cpu_count() - 1) if os.cpu_count() else 4
                     logger.info(f"Initializing faster-whisper with {cpu_threads} CPU threads...")
-                    # Initialize tiny model for language detection and English transcription
-                    logger.info("Initializing faster-whisper tiny model (for language detection and English)...")
-                    self.language_detector = WhisperModel(
-                        "tiny", 
-                        device="cpu", 
-                        compute_type="int8",
-                        cpu_threads=cpu_threads,
-                        num_workers=1
-                    )
-                    self.tiny_model = self.language_detector  # Reuse for English
-                    logger.info("Tiny model loaded successfully")
-                    
-                    # Small model will be loaded lazily when needed for non-English
-                    logger.info("Small model will be loaded on-demand for non-English languages")
+
+                    if self.model_size != "auto":
+                        # User specified an explicit model — use it for everything
+                        logger.info(f"Initializing faster-whisper {self.model_size} model (user-selected)...")
+                        self.explicit_model = WhisperModel(
+                            self.model_size,
+                            device="cpu",
+                            compute_type="int8",
+                            cpu_threads=cpu_threads,
+                            num_workers=1
+                        )
+                        self.language_detector = self.explicit_model
+                        self.tiny_model = self.explicit_model
+                        logger.info(f"{self.model_size} model loaded successfully")
+                    else:
+                        # Auto mode: tiny for detection/English, small lazy-loaded for others
+                        logger.info("Initializing faster-whisper tiny model (for language detection and English)...")
+                        self.language_detector = WhisperModel(
+                            "tiny",
+                            device="cpu",
+                            compute_type="int8",
+                            cpu_threads=cpu_threads,
+                            num_workers=1
+                        )
+                        self.tiny_model = self.language_detector
+                        logger.info("Tiny model loaded successfully")
+                        logger.info("Small model will be loaded on-demand for non-English languages")
                 except ImportError:
                     logger.warning("faster-whisper not available, falling back to openai-whisper")
                     self.use_faster_whisper = False
-            
+
             if not self.use_faster_whisper:
-                import whisper
-                # Initialize tiny model for language detection and English transcription
-                logger.info("Initializing openai-whisper tiny model (for language detection and English)...")
-                self.language_detector = whisper.load_model("tiny")
-                self.tiny_model = self.language_detector  # Reuse for English
-                logger.info("Tiny model loaded successfully")
-                
-                # Small model will be loaded lazily when needed for non-English
-                logger.info("Small model will be loaded on-demand for non-English languages")
-                
+                try:
+                    import whisper
+                except ImportError:
+                    raise ImportError(
+                        "Neither faster-whisper nor openai-whisper is installed. "
+                        "Install one of them:\n"
+                        "  pip install faster-whisper   (recommended)\n"
+                        "  pip install openai-whisper   (or: pip install .[whisper])"
+                    )
+                if self.model_size != "auto":
+                    logger.info(f"Initializing openai-whisper {self.model_size} model (user-selected)...")
+                    self.explicit_model = whisper.load_model(self.model_size)
+                    self.language_detector = self.explicit_model
+                    self.tiny_model = self.explicit_model
+                    logger.info(f"{self.model_size} model loaded successfully")
+                else:
+                    logger.info("Initializing openai-whisper tiny model (for language detection and English)...")
+                    self.language_detector = whisper.load_model("tiny")
+                    self.tiny_model = self.language_detector
+                    logger.info("Tiny model loaded successfully")
+                    logger.info("Small model will be loaded on-demand for non-English languages")
+
         except ImportError as e:
             logger.error(f"Whisper library not installed. Install with: pip install faster-whisper (or openai-whisper)")
             raise
@@ -120,19 +159,25 @@ class WhisperTranscriber:
     def _get_transcription_model(self, language: str):
         """
         Get the appropriate model for transcription based on language.
-        English uses tiny, others use small.
-        
+
+        If user specified an explicit model, always returns that.
+        In auto mode: English uses tiny, others use small (lazy-loaded).
+
         Args:
             language: Detected language code
-        
+
         Returns:
             Whisper model instance
         """
-        # English uses tiny model
+        # Explicit model overrides auto-selection
+        if self.explicit_model is not None:
+            return self.explicit_model
+
+        # Auto mode: English uses tiny model
         if language == "en":
             return self.tiny_model
-        
-        # Non-English uses small model (load lazily)
+
+        # Auto mode: Non-English uses small model (load lazily)
         if self.small_model is None:
             logger.info("Loading small model for non-English transcription...")
             if self.use_faster_whisper:
@@ -140,8 +185,8 @@ class WhisperTranscriber:
                 import os
                 cpu_threads = max(1, os.cpu_count() - 1) if os.cpu_count() else 4
                 self.small_model = WhisperModel(
-                    "small", 
-                    device="cpu", 
+                    "small",
+                    device="cpu",
                     compute_type="int8",
                     cpu_threads=cpu_threads,
                     num_workers=1
@@ -150,7 +195,7 @@ class WhisperTranscriber:
                 import whisper
                 self.small_model = whisper.load_model("small")
             logger.info("Small model loaded successfully")
-        
+
         return self.small_model
     
     def _get_video_info(self, video_id: str, force_refresh: bool = False) -> Optional[dict]:
@@ -166,8 +211,10 @@ class WhisperTranscriber:
         """
         import yt_dlp
         
-        # Check if video_id is already a URL (for Twitter/X.com support)
-        if video_id.startswith("http://") or video_id.startswith("https://"):
+        # Determine URL: local file, full URL, or YouTube video ID
+        if _is_local_file(video_id):
+            url = video_id
+        elif video_id.startswith("http://") or video_id.startswith("https://"):
             url = video_id
         else:
             url = f"https://www.youtube.com/watch?v={video_id}"
@@ -243,16 +290,19 @@ class WhisperTranscriber:
             import yt_dlp
             import tempfile
             
-            # Check if video_id is already a URL (for Twitter/X.com support)
-            if video_id.startswith("http://") or video_id.startswith("https://"):
+            # Determine URL: local file, full URL, or YouTube video ID
+            if _is_local_file(video_id):
                 url = video_id
-                # Create a safe filename from URL
+                url_hash = str(hash(video_id))[:8]
+                audio_filename = f"local_audio_{url_hash}_{int(start_time)}_{int(time.time())}.wav"
+            elif video_id.startswith("http://") or video_id.startswith("https://"):
+                url = video_id
                 url_hash = str(hash(video_id))[:8]
                 audio_filename = f"video_audio_{url_hash}_{int(start_time)}_{int(time.time())}.wav"
             else:
                 url = f"https://www.youtube.com/watch?v={video_id}"
                 audio_filename = f"youtube_audio_{video_id}_{int(start_time)}_{int(time.time())}.wav"
-            
+
             # Create temporary file for audio
             temp_dir = tempfile.gettempdir()
             audio_path = os.path.join(temp_dir, audio_filename)
@@ -433,16 +483,19 @@ class WhisperTranscriber:
             import tempfile
             import threading
             
-            # Check if video_id is already a URL (for Twitter/X.com support)
-            if video_id.startswith("http://") or video_id.startswith("https://"):
+            # Determine URL: local file, full URL, or YouTube video ID
+            if _is_local_file(video_id):
                 url = video_id
-                # Create a safe filename from URL
+                url_hash = str(hash(video_id))[:8]
+                audio_filename = f"local_audio_{url_hash}_{int(time.time())}.wav"
+            elif video_id.startswith("http://") or video_id.startswith("https://"):
+                url = video_id
                 url_hash = str(hash(video_id))[:8]
                 audio_filename = f"video_audio_{url_hash}_{int(time.time())}.wav"
             else:
                 url = f"https://www.youtube.com/watch?v={video_id}"
                 audio_filename = f"youtube_audio_{video_id}_{int(time.time())}.wav"
-            
+
             # Create temporary file for audio
             temp_dir = tempfile.gettempdir()
             audio_path = os.path.join(temp_dir, audio_filename)
@@ -518,7 +571,7 @@ class WhisperTranscriber:
                                     logger.warning("Download error, invalidating cache and retrying...")
                                     del self._video_info_cache[video_id]
                                     # Retry with fresh info (but limit to one retry to avoid infinite loop)
-                                    return self.extract_audio_from_youtube(video_id, duration, force_refresh_info=True)
+                                    return self.extract_audio_from_youtube(video_id, duration, overlap=overlap, start_time=start_time, force_refresh_info=True)
                                 raise download_error[0]
                         else:
                             logger.warning(f"Download timeout after {timeout_seconds}s")

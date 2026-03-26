@@ -11,10 +11,9 @@ yt-dlp>=2023.10.7
 faster-whisper>=0.9.0
 
 # Option 2: openai-whisper (alternative, slower but more widely used)
-# openai-whisper>=20231117
-
-# For Russian speech recognition (optional, but recommended for Russian audio)
-# Hugging Face Hub for loading fine-tuned Russian Whisper model
+# Install manually if you need --no-faster-whisper:
+#   pip install openai-whisper>=20231117
+# See pyproject.toml [project.optional-dependencies] for a pip install .[whisper] shortcut.
 
 # For translation
 deep-translator>=1.11.4
@@ -34,9 +33,12 @@ fastapi>=0.104.0
 uvicorn[standard]>=0.24.0
 aiohttp>=3.8.0
 
+# Env-file loading and data validation (used by bot server)
+python-dotenv>=1.0.0
+pydantic>=2.0.0
+
 # Note: FFmpeg is required for audio processing
 # Install FFmpeg separately:
 # - macOS: brew install ffmpeg
 # - Linux: sudo apt-get install ffmpeg (or equivalent)
 # - Windows: Download from https://ffmpeg.org/download.html
-

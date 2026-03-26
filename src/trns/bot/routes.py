@@ -25,9 +25,12 @@ from trns.bot.utils import (
     add_authenticated_user,
     update_context,
     reset_context,
+    get_context,
     check_token_warning,
     check_capacity_at_start,
     get_daily_capacity,
+    DAILY_CAPACITY,
+    WARNING_THRESHOLD,
     load_config as load_config_utils,
     save_config,
     initialize_user_settings,
@@ -137,8 +140,8 @@ async def cancel_command(client: Client, message: Message) -> None:
     await cancel_user_processing(user_id)
     
     # Reset context
-    reset_context()
-    
+    reset_context(user_id)
+
     # Clear user state
     set_user_state(user_id, None)
     
@@ -164,10 +167,10 @@ async def stats_command(client: Client, message: Message) -> None:
     capacity = get_daily_capacity()
     
     # Format message
-    stats_text = f"📊 Статистика:\n\nОсталось запросов сегодня: {capacity} / 1000"
-    
-    if capacity < 50:
-        stats_text += f"\n⚠️ Внимание: осталось менее 50 запросов!"
+    stats_text = f"📊 Статистика:\n\nОсталось запросов сегодня: {capacity} / {DAILY_CAPACITY}"
+
+    if capacity < WARNING_THRESHOLD:
+        stats_text += f"\n⚠️ Внимание: осталось менее {WARNING_THRESHOLD} запросов!"
     
     await message.reply_text(stats_text)
 
@@ -237,6 +240,7 @@ def is_youtube_url(text: str) -> bool:
         r'(?:https?://)?(?:www\.)?(?:youtube\.com/watch\?v=|youtu\.be/)([a-zA-Z0-9_-]{11})',
         r'(?:https?://)?(?:www\.)?youtube\.com/live/([a-zA-Z0-9_-]{11})',
         r'(?:https?://)?(?:www\.)?youtube\.com/embed/([a-zA-Z0-9_-]{11})',
+        r'(?:https?://)?(?:www\.)?youtube\.com/shorts/([a-zA-Z0-9_-]{11})',
     ]
     for pattern in youtube_patterns:
         if re.search(pattern, text):
@@ -441,6 +445,7 @@ async def _process_url_video(url: str, video_id: str, user_id: int, client: Clie
         args = apply_config_to_args(args, config)
         args = _resolve_args_paths(args)
         args.url = url
+        args.context = get_context(user_id)
         args.show_original_translation = show_original
         args.show_transcription = show_transcription
 
@@ -458,7 +463,7 @@ async def _process_url_video(url: str, video_id: str, user_id: int, client: Clie
             metadata=metadata, source=source,
         )
 
-        reset_context()
+        reset_context(user_id)
 
     except asyncio.CancelledError:
         logger.info(f"Processing cancelled for user {user_id}")
@@ -466,7 +471,7 @@ async def _process_url_video(url: str, video_id: str, user_id: int, client: Clie
             await client.send_message(chat_id=chat_id, text=get_text(metadata, "cancel_success"))
         except Exception as e:
             logger.debug(f"Error sending cancel message: {e}")
-        reset_context()
+        reset_context(user_id)
     except Exception as e:
         logger.exception(f"Error processing {source} video: {e}")
         error_text = get_text(metadata, "error_occurred")
@@ -474,7 +479,7 @@ async def _process_url_video(url: str, video_id: str, user_id: int, client: Clie
             await client.send_message(chat_id=chat_id, text=f"{error_text} {str(e)}")
         except Exception as e2:
             logger.error(f"Error sending error message: {e2}")
-        reset_context()
+        reset_context(user_id)
     finally:
         with processing_lock:
             if user_id in user_processing_tasks:
@@ -488,15 +493,13 @@ async def process_youtube_video(url: str, user_id: int, client: Client, message:
 
 
 async def process_twitter_video(url: str, user_id: int, client: Client, message: Message):
-    """Process Twitter/X.com video using TranscriptionPipeline."""
-    video_id = url
-    if "/status/" in url:
-        try:
-            status_id = url.split("/status/")[-1].split("?")[0]
-            video_id = f"twitter_{status_id}"
-        except:
-            video_id = "twitter_video"
-    await _process_url_video(url, video_id, user_id, client, message, source="Twitter")
+    """Process Twitter/X.com video using TranscriptionPipeline.
+
+    Pass the full URL as video_id so yt-dlp can fetch it directly.
+    The synthetic twitter_ prefix was causing the transcription layer
+    to treat it as a YouTube video ID.
+    """
+    await _process_url_video(url, url, user_id, client, message, source="Twitter")
 
 
 async def process_video_file(video_path: str, user_id: int, client: Client, message: Message):
@@ -564,6 +567,7 @@ async def process_video_file(video_path: str, user_id: int, client: Client, mess
         args = _resolve_args_paths(args)
         args.url = ""  # Not a YouTube URL
         args.process_mode = "full"  # Process entire video at once
+        args.context = get_context(user_id)
         args.show_original_translation = show_original
         args.show_transcription = show_transcription
         
@@ -575,13 +579,6 @@ async def process_video_file(video_path: str, user_id: int, client: Client, mess
             except Exception as e:
                 logger.error(f"Error sending error message: {e}")
             return
-        
-        # Send processing started message
-        try:
-            await client.send_message(chat_id=chat_id, text=get_text(metadata, "processing_started"))
-        except Exception as e:
-            logger.error(f"Error sending processing started message: {e}")
-            # Continue anyway
         
         # Use a queue to send output in real-time (no builtins.print patching)
         output_queue = queue.Queue()
@@ -824,8 +821,8 @@ async def process_video_file(video_path: str, user_id: int, client: Client, mess
                 logger.debug(f"Error sending completion message: {e}")
         
         # Reset context after processing
-        reset_context()
-        
+        reset_context(user_id)
+
     except asyncio.CancelledError:
         logger.info(f"Processing cancelled for user {user_id}")
         try:
@@ -833,7 +830,7 @@ async def process_video_file(video_path: str, user_id: int, client: Client, mess
         except Exception as e:
             logger.debug(f"Error sending cancel message: {e}")
         # Reset context on cancel
-        reset_context()
+        reset_context(user_id)
     except Exception as e:
         logger.exception(f"Error processing video file: {e}")
         error_text = get_text(metadata, "error_occurred")
@@ -842,7 +839,7 @@ async def process_video_file(video_path: str, user_id: int, client: Client, mess
         except Exception as e2:
             logger.error(f"Error sending error message: {e2}")
         # Reset context on error
-        reset_context()
+        reset_context(user_id)
     finally:
         # Always clean up files and processing state in finally block
         # Clean up audio file
@@ -932,7 +929,7 @@ async def handle_text_message(client: Client, message: Message) -> None:
     
     if state == STATE_WAITING_CONTEXT:
         # User is entering context
-        update_context(text)
+        update_context(user_id, text)
         set_user_state(user_id, None)
         keyboard = create_keyboard(metadata, user_id)
         await message.reply_text(
@@ -1099,8 +1096,8 @@ async def handle_video_message(client: Client, message: Message) -> None:
     # Check file size - Pyrogram supports up to 2GB
     file_size = video.file_size
     MAX_FILE_SIZE = 2 * 1024 * 1024 * 1024  # 2GB in bytes
-    
-    if file_size > MAX_FILE_SIZE:
+
+    if file_size is not None and file_size > MAX_FILE_SIZE:
         await message.reply_text(
             f"❌ File is too large ({file_size / (1024*1024*1024):.2f} GB). "
             f"Maximum size is {MAX_FILE_SIZE / (1024*1024*1024):.0f} GB."
@@ -1155,7 +1152,8 @@ async def handle_video_message(client: Client, message: Message) -> None:
         download_start = time.time()
         await message.download(file_name=video_path)
         download_time = time.time() - download_start
-        logger.info(f"[PERF] Video download completed in {download_time:.1f}s ({file_size / (1024*1024):.1f}MB)")
+        size_mb = f"{file_size / (1024*1024):.1f}MB" if file_size is not None else "unknown size"
+        logger.info(f"[PERF] Video download completed in {download_time:.1f}s ({size_mb})")
         
         # Start processing in background (fire-and-forget)
         async def process_with_cleanup():
@@ -1261,8 +1259,9 @@ async def route_update(client: Client, update: Update):
         
         # Handle commands
         if message.text and message.text.startswith('/'):
-            command = message.text.split()[0].lower()
-            
+            raw_command = message.text.split()[0].lower()
+            command = raw_command.split('@')[0]
+
             if command == '/start':
                 await start_command(client, message)
             elif command == '/cancel':

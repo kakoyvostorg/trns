@@ -282,16 +282,16 @@ class LMProcessor:
         # Replace {LANGUAGE} placeholder with actual language
         prompt = self.prompt_original_template.replace('{LANGUAGE}', language_name)
         
+        # Decrement capacity once per logical request (not per retry)
+        self._get_token_and_decrement()
+
         max_retries = 3
         for attempt in range(max_retries):
             try:
                 content = prompt + "\n\n" + text
-                
+
                 logger.info(f"Processing original language ({language_name}) through LM...")
-                
-                # Update token before API call (decrement capacity, refresh client if needed)
-                self._get_token_and_decrement()
-                
+
                 # Call LM API
                 messages = [
                     {
@@ -377,16 +377,16 @@ class LMProcessor:
             logger.debug("No Russian text to process")
             return None
         
+        # Decrement capacity once per logical request (not per retry)
+        self._get_token_and_decrement()
+
         max_retries = 3
         for attempt in range(max_retries):
             try:
                 content = self.prompt_russian + "\n\n" + text
-                
+
                 logger.info(f"Processing Russian translation through LM...")
-                
-                # Update token before API call (decrement capacity, refresh client if needed)
-                self._get_token_and_decrement()
-                
+
                 # Call LM API
                 messages = [
                     {

@@ -14,14 +14,20 @@ services:
       - TELEGRAM_API_HASH=${TELEGRAM_API_HASH}
       - AUTH_KEY=${AUTH_KEY}
       - OPENROUTER_API_KEY=${OPENROUTER_API_KEY}
+      - WEBHOOK_SECRET=${WEBHOOK_SECRET:-}
+      - ADMIN_TOKEN=${ADMIN_TOKEN:-}
+      # TRNS_HOME tells the app where to find config.json, metadata.json, etc.
+      # Must match the container-side mount path below.
+      - TRNS_HOME=/app/config
       - HOST=0.0.0.0
       - PORT=8000
     volumes:
+      # Place config.json, metadata.json, api_key.txt, etc. in ../config/
       - ../config:/app/config
       - ../data:/app/data
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "python", "-c", "import requests; requests.get('http://localhost:8000/health')"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
       interval: 30s
       timeout: 10s
       retries: 3

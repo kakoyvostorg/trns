@@ -19,25 +19,62 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
+# Base directory for resolving relative resource paths
+_trns_home = os.path.abspath(os.environ.get("TRNS_HOME", os.getcwd()))
+
 # Thread lock for token management
 _token_lock = threading.Lock()
+
+# Thread lock for user settings read-modify-write
+_settings_lock = threading.Lock()
 
 # Daily capacity constants
 DAILY_CAPACITY = 1000
 WARNING_THRESHOLD = 50
 
 
+def _resolve_path(path: str) -> str:
+    """Resolve a relative path against TRNS_HOME."""
+    if path and not os.path.isabs(path):
+        return os.path.join(_trns_home, path)
+    return path
+
+
 def load_metadata(metadata_path: str = None) -> Dict:
-    """Load metadata from JSON file (with optional env var override)"""
+    """Load metadata from JSON file (with optional env var override).
+
+    If the file does not exist, returns a minimal default so the bot can
+    start up (with English-only placeholder strings) instead of crashing.
+    """
     if metadata_path is None:
         metadata_path = os.getenv("METADATA_PATH", "metadata.json")
-    
+    metadata_path = _resolve_path(metadata_path)
+
     try:
         with open(metadata_path, 'r', encoding='utf-8') as f:
             return json.load(f)
     except FileNotFoundError:
-        logger.error(f"Metadata file not found: {metadata_path}")
-        raise
+        logger.warning(
+            f"Metadata file not found: {metadata_path}. "
+            "Using minimal built-in defaults. Copy the project's metadata.json "
+            "into your TRNS_HOME directory for full localisation support."
+        )
+        return {
+            "default_language": "en",
+            "token_capacity": 1000,
+            "languages": {
+                "en": {
+                    "start_message": "Welcome! Please enter your authentication key.",
+                    "invalid_key": "Invalid key. Please try again.",
+                    "auth_success": "Authentication successful!",
+                    "processing_video": "Processing video...",
+                    "processing_complete": "✅ Processing complete.",
+                    "error_occurred": "An error occurred:",
+                    "not_authenticated": "You are not authenticated. Use /start to begin.",
+                    "unknown_text": "Send a YouTube URL, Twitter/X.com URL, or video file to process."
+                }
+            }
+        }
     except json.JSONDecodeError as e:
         logger.error(f"Error parsing metadata.json: {e}")
         raise
@@ -45,6 +82,7 @@ def load_metadata(metadata_path: str = None) -> Dict:
 
 def save_metadata(metadata: Dict, metadata_path: str = "metadata.json"):
     """Save metadata to JSON file"""
+    metadata_path = _resolve_path(metadata_path)
     try:
         with open(metadata_path, 'w', encoding='utf-8') as f:
             json.dump(metadata, f, indent=2, ensure_ascii=False)
@@ -76,8 +114,9 @@ def load_auth_key(key_path: str = "key.txt") -> str:
     auth_key = os.getenv("AUTH_KEY")
     if auth_key:
         return auth_key.strip()
-    
+
     # Fallback to file
+    key_path = _resolve_path(key_path)
     try:
         with open(key_path, 'r', encoding='utf-8') as f:
             return f.read().strip()
@@ -90,7 +129,8 @@ def is_user_authenticated(user_id: int, config_path: str = None) -> bool:
     """Check if user ID is in allowed list (from config.json)"""
     if config_path is None:
         config_path = os.getenv("CONFIG_PATH", "config.json")
-    
+    config_path = _resolve_path(config_path)
+
     try:
         config = load_config(config_path)
         allowed_ids = config.get("allowed_user_ids", [])
@@ -103,13 +143,14 @@ def is_user_authenticated(user_id: int, config_path: str = None) -> bool:
 def add_authenticated_user(user_id: int, config_path: str = None):
     """
     Add user ID to allowed list in config.json with file locking to prevent race conditions.
-    
+
     This function uses file locking to ensure atomic read-modify-write operations,
     preventing data loss when multiple users authenticate concurrently.
     """
     if config_path is None:
         config_path = os.getenv("CONFIG_PATH", "config.json")
-    
+    config_path = _resolve_path(config_path)
+
     import tempfile
     
     # Import platform-specific locking
@@ -204,7 +245,8 @@ def load_config(config_path: str = None) -> Dict:
     """Load configuration from JSON file (with optional env var override)"""
     if config_path is None:
         config_path = os.getenv("CONFIG_PATH", "config.json")
-    
+    config_path = _resolve_path(config_path)
+
     try:
         with open(config_path, 'r', encoding='utf-8') as f:
             return json.load(f)
@@ -218,6 +260,7 @@ def load_config(config_path: str = None) -> Dict:
 
 def save_config(config: Dict, config_path: str = "config.json"):
     """Save configuration to JSON file"""
+    config_path = _resolve_path(config_path)
     try:
         with open(config_path, 'w', encoding='utf-8') as f:
             json.dump(config, f, indent=2, ensure_ascii=False)
@@ -226,16 +269,19 @@ def save_config(config: Dict, config_path: str = "config.json"):
         raise
 
 
-def update_context(context_text: str, config_path: str = "config.json"):
-    """Update context field in config.json"""
-    config = load_config(config_path)
-    config["context"] = context_text
-    save_config(config, config_path)
+def update_context(user_id: int, context_text: str, settings_path: str = "user_settings.json"):
+    """Update context for a specific user in user_settings.json"""
+    set_user_setting(user_id, "context", context_text, settings_path)
 
 
-def reset_context(config_path: str = "config.json"):
-    """Reset context to empty string in config.json"""
-    update_context("", config_path)
+def reset_context(user_id: int, settings_path: str = "user_settings.json"):
+    """Reset context to empty string for a specific user"""
+    update_context(user_id, "", settings_path)
+
+
+def get_context(user_id: int, settings_path: str = "user_settings.json") -> str:
+    """Get context for a specific user"""
+    return get_user_setting(user_id, "context", default="", settings_path=settings_path)
 
 
 def load_tokens(api_key_path: str = "api_key.txt") -> List[str]:
@@ -244,8 +290,9 @@ def load_tokens(api_key_path: str = "api_key.txt") -> List[str]:
     api_key = os.getenv("OPENROUTER_API_KEY")
     if api_key:
         return [api_key.strip()]
-    
+
     # Fallback to file
+    api_key_path = _resolve_path(api_key_path)
     if not os.path.exists(api_key_path):
         return []
     
@@ -260,6 +307,7 @@ def load_tokens(api_key_path: str = "api_key.txt") -> List[str]:
 
 def save_tokens(tokens: List[str], api_key_path: str = "api_key.txt"):
     """Save tokens to api_key.txt (one per line)"""
+    api_key_path = _resolve_path(api_key_path)
     try:
         with open(api_key_path, 'w', encoding='utf-8') as f:
             for token in tokens:
@@ -397,10 +445,11 @@ def load_user_settings(settings_path: str = "user_settings.json") -> Dict:
     """
     Load user settings from JSON file.
     Creates file with empty dict if it doesn't exist.
-    
+
     Returns:
         Dictionary mapping user_id (as string) to settings dict
     """
+    settings_path = _resolve_path(settings_path)
     if not os.path.exists(settings_path):
         logger.info(f"User settings file not found, creating: {settings_path}")
         save_user_settings({}, settings_path)
@@ -424,15 +473,16 @@ def load_user_settings(settings_path: str = "user_settings.json") -> Dict:
 def save_user_settings(settings: Dict, settings_path: str = "user_settings.json"):
     """
     Save user settings to JSON file.
-    
+
     Args:
         settings: Dictionary mapping user_id to settings dict
         settings_path: Path to settings file
     """
+    settings_path = _resolve_path(settings_path)
     try:
         # Convert int keys to string for JSON serialization
         settings_for_json = {str(k): v for k, v in settings.items()}
-        
+
         with open(settings_path, 'w', encoding='utf-8') as f:
             json.dump(settings_for_json, f, indent=2, ensure_ascii=False)
     except Exception as e:
@@ -464,38 +514,41 @@ def get_user_setting(user_id: int, setting_key: str, default=None, settings_path
 def set_user_setting(user_id: int, setting_key: str, value, settings_path: str = "user_settings.json"):
     """
     Set a specific setting for a user.
-    
+    Uses a lock to prevent concurrent read-modify-write races.
+
     Args:
         user_id: Telegram user ID
         setting_key: Setting key to set
         value: Value to set
         settings_path: Path to settings file
     """
-    settings = load_user_settings(settings_path)
-    
-    if user_id not in settings:
-        settings[user_id] = {}
-    
-    settings[user_id][setting_key] = value
-    save_user_settings(settings, settings_path)
+    with _settings_lock:
+        settings = load_user_settings(settings_path)
+
+        if user_id not in settings:
+            settings[user_id] = {}
+
+        settings[user_id][setting_key] = value
+        save_user_settings(settings, settings_path)
 
 
 def initialize_user_settings(user_id: int, settings_path: str = "user_settings.json"):
     """
     Initialize default settings for a new user.
     Default: show_original_translation=True, show_transcription=True
-    
+
     Args:
         user_id: Telegram user ID
         settings_path: Path to settings file
     """
-    settings = load_user_settings(settings_path)
-    
-    if user_id not in settings:
-        settings[user_id] = {
-            "show_original_translation": True,
-            "show_transcription": True
-        }
-        save_user_settings(settings, settings_path)
+    with _settings_lock:
+        settings = load_user_settings(settings_path)
+
+        if user_id not in settings:
+            settings[user_id] = {
+                "show_original_translation": True,
+                "show_transcription": True
+            }
+            save_user_settings(settings, settings_path)
         logger.info(f"Initialized default settings for user {user_id}")
 
