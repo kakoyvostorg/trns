@@ -29,14 +29,15 @@ def extract_video_id(url_or_id: str) -> str:
         return url_or_id
     if "youtube.com" in url_or_id or "youtu.be" in url_or_id:
         if "v=" in url_or_id:
-            result = url_or_id.split("v=")[-1].split("&")[0]
-            return result
+            return url_or_id.split("v=")[-1].split("&")[0]
         elif "youtu.be/" in url_or_id:
-            result = url_or_id.split("youtu.be/")[-1].split("?")[0]
-            return result
+            return url_or_id.split("youtu.be/")[-1].split("?")[0]
         elif "/shorts/" in url_or_id:
-            result = url_or_id.split("/shorts/")[-1].split("?")[0]
-            return result
+            return url_or_id.split("/shorts/")[-1].split("?")[0]
+        elif "/live/" in url_or_id:
+            return url_or_id.split("/live/")[-1].split("?")[0]
+        elif "/embed/" in url_or_id:
+            return url_or_id.split("/embed/")[-1].split("?")[0]
     return url_or_id
 
 
@@ -45,6 +46,8 @@ class TranscriptionPipeline:
     Main transcription pipeline that orchestrates audio extraction,
     transcription, translation, and LM processing.
     """
+
+    DUPLICATE_BREAK_THRESHOLD = 3
     
     def __init__(
         self,
@@ -89,8 +92,9 @@ class TranscriptionPipeline:
         self.last_chunk_end_text = ""
         self.last_chunk_end_translated = ""
         
-        # Duplicate detection for breaking on repeated transcriptions
+        # Duplicate detection: break only after N consecutive identical chunks
         self.last_transcription_text = None
+        self._consecutive_duplicates = 0
         
         # Queues
         self.transcription_queue = None
@@ -677,10 +681,14 @@ class TranscriptionPipeline:
                     'language_prob': result_lang_prob
                 })
                 
-                # Check if transcription is duplicate (same as last one) - break if so
                 if self.last_transcription_text is not None and result_text.strip() == self.last_transcription_text.strip():
-                    logger.info(f"Duplicate transcription detected (same as last): '{result_text[:50]}...'. Breaking loop.")
-                    return True  # Signal to break
+                    self._consecutive_duplicates += 1
+                    logger.warning(f"Consecutive duplicate #{self._consecutive_duplicates}: '{result_text[:50]}...'")
+                    if self._consecutive_duplicates >= self.DUPLICATE_BREAK_THRESHOLD:
+                        logger.info(f"Breaking after {self._consecutive_duplicates} consecutive duplicates.")
+                        return True
+                    continue
+                self._consecutive_duplicates = 0
                 self.last_transcription_text = result_text
                 
                 # Add to sentence buffers
@@ -826,7 +834,10 @@ class TranscriptionPipeline:
                                     # Try to translate subtitles for LM processing
                                     try:
                                         translated_text = self.whisper_transcriber.translate_to_russian(text, self.args.language)
-                                    except:
+                                    except Exception as e:
+                                        logger.debug(
+                                            "Subtitle translation failed, using original: %s", e, exc_info=True
+                                        )
                                         translated_text = text  # Fallback to original if translation fails
                                 
                                 # Store in cumulative list
@@ -839,15 +850,18 @@ class TranscriptionPipeline:
                                     'language_prob': 1.0
                                 })
                                 
-                                # Check if transcription is duplicate (same as last one) - break if so
                                 if self.last_transcription_text is not None and text.strip() == self.last_transcription_text.strip():
-                                    logger.info(f"Duplicate transcription detected (same as last): '{text[:50]}...'. Breaking loop.")
-                                    self.subtitles_fully_processed = True
-                                    # Process any remaining LM results before breaking
-                                    if self.lm_processor:
-                                        self._process_lm_results()
-                                    break
-                                self.last_transcription_text = text
+                                    self._consecutive_duplicates += 1
+                                    logger.warning(f"Consecutive duplicate subtitle #{self._consecutive_duplicates}: '{text[:50]}...'")
+                                    if self._consecutive_duplicates >= self.DUPLICATE_BREAK_THRESHOLD:
+                                        logger.info(f"Breaking after {self._consecutive_duplicates} consecutive duplicate subtitles.")
+                                        self.subtitles_fully_processed = True
+                                        if self.lm_processor:
+                                            self._process_lm_results()
+                                        break
+                                else:
+                                    self._consecutive_duplicates = 0
+                                    self.last_transcription_text = text
                                 
                                 # Output transcription
                                 lm_output_mode = getattr(self.args, 'lm_output_mode', 'both')
@@ -1083,14 +1097,17 @@ class TranscriptionPipeline:
                                         'language_prob': language_prob
                                     })
                                     
-                                    # Check if transcription is duplicate (same as last one) - break if so
                                     if self.last_transcription_text is not None and text.strip() == self.last_transcription_text.strip():
-                                        logger.info(f"Duplicate transcription detected (same as last): '{text[:50]}...'. Breaking loop.")
-                                        # Process any remaining LM results before breaking
-                                        if self.lm_processor:
-                                            self._process_lm_results()
-                                        break
-                                    self.last_transcription_text = text
+                                        self._consecutive_duplicates += 1
+                                        logger.warning(f"Consecutive duplicate chunk #{self._consecutive_duplicates}: '{text[:50]}...'")
+                                        if self._consecutive_duplicates >= self.DUPLICATE_BREAK_THRESHOLD:
+                                            logger.info(f"Breaking after {self._consecutive_duplicates} consecutive duplicate chunks.")
+                                            if self.lm_processor:
+                                                self._process_lm_results()
+                                            break
+                                    else:
+                                        self._consecutive_duplicates = 0
+                                        self.last_transcription_text = text
                                     
                                     # Add to sentence buffers
                                     self.text_buffer += " " + text if self.text_buffer else text
@@ -1273,8 +1290,8 @@ class TranscriptionPipeline:
                 if self.shutdown_flag():
                     try:
                         self.transcription_queue.put(None)
-                    except:
-                        pass
+                    except Exception as e:
+                        logger.debug("Shutdown signal to transcription queue failed: %s", e)
             
             # Process any remaining results
             while not self.result_queue.empty():
@@ -1309,16 +1326,16 @@ class TranscriptionPipeline:
                     self.transcription_queue.put(None)  # Shutdown signal
                     # Give worker a moment to finish
                     time.sleep(0.5)
-                except:
-                    pass
+                except Exception as e:
+                    logger.debug("Shutdown signal to transcription queue failed: %s", e)
             
             if self.lm_processor and self.lm_queue:
                 try:
                     self.lm_queue.put(None)  # Shutdown signal
                     # Give worker a moment to finish
                     time.sleep(0.5)
-                except:
-                    pass
+                except Exception as e:
+                    logger.debug("Shutdown signal to LM queue failed: %s", e)
             
             logger.info("Transcription stopped. Goodbye!")
 

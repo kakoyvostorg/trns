@@ -7,6 +7,7 @@ Runs asynchronously in a background worker thread.
 
 import math
 import logging
+import queue
 import sys
 import os
 from typing import List, Dict, Optional, Callable
@@ -108,7 +109,7 @@ class LMProcessor:
                         metadata = load_metadata(self.metadata_path)
                         error_msg = get_text(metadata, "no_tokens_available")
                         logger.error(error_msg)
-                    except:
+                    except Exception:
                         logger.error("No tokens available in api_key.txt")
                     raise ValueError("No tokens available")
                 
@@ -211,11 +212,16 @@ class LMProcessor:
                     metadata = load_metadata(self.metadata_path)
                     error_msg = get_text(metadata, "no_tokens_available")
                     logger.error(error_msg)
-                except:
+                except Exception:
                     logger.error("No tokens available")
                 return None
 
-            # Refresh client if the token has changed (e.g. after rotation)
+            has_capacity = decrement_daily_capacity(self.metadata_path)
+            if not has_capacity:
+                logger.warning("Daily capacity exhausted; skipping LM API call.")
+                return None
+
+            # Refresh client only after capacity is reserved (token may have rotated)
             if self.client is None or self.client.api_key != token:
                 from openai import OpenAI
                 self.client = OpenAI(
@@ -223,10 +229,6 @@ class LMProcessor:
                     api_key=token,
                 )
                 logger.info("LM client refreshed with new token")
-
-            has_capacity = decrement_daily_capacity(self.metadata_path)
-            if not has_capacity:
-                logger.warning("Daily capacity exhausted. LM processing will fail.")
 
             return token
         except ImportError:
@@ -282,8 +284,9 @@ class LMProcessor:
         # Replace {LANGUAGE} placeholder with actual language
         prompt = self.prompt_original_template.replace('{LANGUAGE}', language_name)
         
-        # Decrement capacity once per logical request (not per retry)
-        self._get_token_and_decrement()
+        # Reserve capacity once per logical request (not per retry)
+        if self._get_token_and_decrement() is None:
+            return None
 
         max_retries = 3
         for attempt in range(max_retries):
@@ -377,8 +380,9 @@ class LMProcessor:
             logger.debug("No Russian text to process")
             return None
         
-        # Decrement capacity once per logical request (not per retry)
-        self._get_token_and_decrement()
+        # Reserve capacity once per logical request (not per retry)
+        if self._get_token_and_decrement() is None:
+            return None
 
         max_retries = 3
         for attempt in range(max_retries):
@@ -527,7 +531,7 @@ class LMProcessor:
                 # Get item from queue (with timeout to check shutdown_flag)
                 try:
                     item = lm_queue.get(timeout=1.0)
-                except:
+                except queue.Empty:
                     # Timeout - check shutdown_flag and continue
                     continue
                 
@@ -548,7 +552,7 @@ class LMProcessor:
                             break
                         lm_queue.task_done()
                         drained_count += 1
-                    except:
+                    except queue.Empty:
                         break
                 
                 if shutdown_requested:
@@ -587,7 +591,7 @@ class LMProcessor:
                 if 'item' in locals() and item is not None:
                     try:
                         lm_queue.task_done()
-                    except:
+                    except ValueError:
                         pass
         
         # Clean up any remaining items in queue on shutdown
@@ -597,7 +601,7 @@ class LMProcessor:
                 item = lm_queue.get_nowait()
                 if item is not None:
                     lm_queue.task_done()
-            except:
+            except queue.Empty:
                 break
         
         logger.info("LM worker thread stopped")

@@ -40,9 +40,17 @@ class TestExtractVideoId:
         result = self.extractor.extract_video_id("abc123XYZ_-")
         assert result == "abc123XYZ_-"
 
-    def test_raises_on_unrecognised_youtube_url(self):
-        with pytest.raises(ValueError):
-            self.extractor.extract_video_id("https://youtube.com/shorts/")
+    def test_shorts_trailing_slash_returns_empty(self):
+        result = self.extractor.extract_video_id("https://youtube.com/shorts/")
+        assert result == ""
+
+    def test_live_url(self):
+        result = self.extractor.extract_video_id("https://www.youtube.com/live/abc123")
+        assert result == "abc123"
+
+    def test_embed_url(self):
+        result = self.extractor.extract_video_id("https://www.youtube.com/embed/abc123")
+        assert result == "abc123"
 
 
 # ---------------------------------------------------------------------------

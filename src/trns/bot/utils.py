@@ -242,7 +242,15 @@ def add_authenticated_user(user_id: int, config_path: str = None):
 
 
 def load_config(config_path: str = None) -> Dict:
-    """Load configuration from JSON file (with optional env var override)"""
+    """Load configuration from JSON file.
+
+    When ``config_path`` is omitted, uses ``CONFIG_PATH`` or ``config.json``,
+    resolved under ``TRNS_HOME`` (same path rules as
+    :func:`trns.transcription.main.load_config`).
+
+    **Strict:** raises if the file is missing or JSON is invalid. For lenient
+    loading that returns ``None``, use :func:`trns.transcription.main.load_config`.
+    """
     if config_path is None:
         config_path = os.getenv("CONFIG_PATH", "config.json")
     config_path = _resolve_path(config_path)

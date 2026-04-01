@@ -48,3 +48,11 @@ The bot created `LMProcessor` with relative paths like `"api_key.txt"` — these
 - **Thread-safe user state access**: added `_user_states_lock` with `get_user_state()`/`set_user_state()` wrappers
 - **Redundant client reinit removed** from `language_model.py`: two identical try/except blocks for OpenAI client refresh replaced by centralized logic in `_get_token_and_decrement()`
 - **All 117 tests pass**
+
+---
+
+## Note (April 2026) — documentation / layout
+
+The bot handler code described above as `routes.py` now lives in the package **`src/trns/bot/routes/`** (submodules `_state`, `_commands`, `_processing`, `_handlers`, `_dispatcher`). Behavior and imports (`trns.bot.routes`) are unchanged; this note only aligns filenames with the repo.
+
+The March summary’s “duplication eliminated” refers to sharing **`_run_pipeline_with_output`** / **`_process_url_video`** between YouTube and Twitter. **Uploads** (`process_video_file`) still use a separate inline Whisper/LM path that mirrors the queue/executor pattern; deduplicating that with `TranscriptionPipeline` remains future work (see English `docs/ARCHITECTURE.md`, §2 design note).

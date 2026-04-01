@@ -753,8 +753,8 @@ class WhisperTranscriber:
             try:
                 if os.path.exists(audio_path):
                     os.remove(audio_path)
-            except:
-                pass
+            except OSError as e:
+                logger.debug("Could not remove temp audio file %s: %s", audio_path, e)
     
     def translate_to_russian(self, text: str, source_language: str) -> str:
         """

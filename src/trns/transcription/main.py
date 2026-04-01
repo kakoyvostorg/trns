@@ -28,6 +28,7 @@ import signal
 import logging
 import json
 import os
+from typing import Optional
 
 from .pipeline import TranscriptionPipeline, extract_video_id
 
@@ -68,8 +69,23 @@ def _resolve_trns_path(path: str) -> str:
     return path
 
 
-def create_default_config(config_path: str = "config.json"):
-    """Create a default configuration JSON file with all parameters"""
+def resolved_config_path_for_cli(explicit_cli_config: bool, cli_config_value: Optional[str]) -> str:
+    """Absolute config file path for logging and ``args.config`` (matches :func:`load_config`)."""
+    if explicit_cli_config:
+        p = cli_config_value if cli_config_value is not None else "config.json"
+    else:
+        p = os.getenv("CONFIG_PATH", "config.json")
+    return _resolve_trns_path(p)
+
+
+def create_default_config(config_path=None):
+    """Create a default configuration JSON file with all parameters.
+
+    When ``config_path`` is omitted, uses ``CONFIG_PATH`` or ``config.json``
+    (same default as :func:`load_config` and ``trns.bot.utils.load_config``).
+    """
+    if config_path is None:
+        config_path = os.getenv("CONFIG_PATH", "config.json")
     config_path = _resolve_trns_path(config_path)
     default_config = {
         "url": "",
@@ -99,8 +115,18 @@ def create_default_config(config_path: str = "config.json"):
     return default_config
 
 
-def load_config(config_path: str = "config.json"):
-    """Load configuration from JSON file. Returns None if file doesn't exist."""
+def load_config(config_path=None):
+    """Load configuration from JSON file.
+
+    When ``config_path`` is omitted, uses ``CONFIG_PATH`` or ``config.json``,
+    resolved under ``TRNS_HOME`` like :func:`trns.bot.utils.load_config`.
+
+    **Lenient:** returns ``None`` if the file is missing or invalid (CLI may
+    then call :func:`create_default_config`). For strict loading that raises
+    on missing file, use ``trns.bot.utils.load_config``.
+    """
+    if config_path is None:
+        config_path = os.getenv("CONFIG_PATH", "config.json")
     config_path = _resolve_trns_path(config_path)
     if not os.path.exists(config_path):
         return None
@@ -332,10 +358,13 @@ Examples:
     parser.add_argument(
         "--config",
         type=str,
-        default="config.json",
-        help="Path to configuration JSON file (default: config.json). If file doesn't exist, a default one will be created."
+        default=None,
+        help=(
+            "Path to configuration JSON file. If omitted, uses CONFIG_PATH or config.json "
+            "(under TRNS_HOME). If the file doesn't exist, a default one will be created."
+        ),
     )
-    
+
     args = parser.parse_args()
 
     # Determine which args the user explicitly passed on the CLI.
@@ -373,14 +402,23 @@ Examples:
     _explicit_args = vars(_sentinel_parser.parse_known_args()[0])
     explicit_cli_keys = set(_explicit_args.keys())
 
-    # Load configuration from JSON file
-    config = load_config(args.config)
+    explicit_config = "config" in explicit_cli_keys
+    config_path_for_load = args.config if explicit_config else None
+
+    # Load configuration from JSON file (omit path so CONFIG_PATH applies when --config not passed)
+    config = load_config(config_path_for_load)
+    resolved_config_path = resolved_config_path_for_cli(explicit_config, args.config)
+
     if config is None:
         # Create default config file if it doesn't exist
-        logger.info(f"Config file {args.config} not found. Creating default configuration...")
-        create_default_config(args.config)
-        logger.info(f"Default configuration created at {args.config}. You can edit it and run again.")
-        config = load_config(args.config)
+        logger.info(f"Config file {resolved_config_path} not found. Creating default configuration...")
+        create_default_config(config_path_for_load)
+        logger.info(
+            f"Default configuration created at {resolved_config_path}. You can edit it and run again."
+        )
+        config = load_config(config_path_for_load)
+
+    args.config = resolved_config_path
 
     # Apply config to args: config fills in defaults, but explicit CLI flags win
     if config:

@@ -266,3 +266,45 @@ class TestProcessRussianTranslation:
 
         assert result == "report"
         assert proc.client.chat.completions.create.call_count == 2
+
+
+# ---------------------------------------------------------------------------
+# Daily capacity — real _get_token_and_decrement + utils patches
+# ---------------------------------------------------------------------------
+
+class TestDailyCapacityEnforcement:
+    """When decrement_daily_capacity returns False, LM must not call the API."""
+
+    def _mock_completion(self, content):
+        completion = MagicMock()
+        completion.choices = [MagicMock()]
+        completion.choices[0].message.content = content
+        return completion
+
+    def test_process_russian_no_api_when_capacity_exhausted(self):
+        proc = make_lm_processor()
+        proc.client.chat.completions.create.return_value = self._mock_completion("should not run")
+
+        with patch("trns.bot.utils.get_current_token", return_value="fake-key"), \
+             patch("trns.bot.utils.decrement_daily_capacity", return_value=False):
+            result = proc.process_russian_translation("some text")
+
+        assert result is None
+        proc.client.chat.completions.create.assert_not_called()
+
+    def test_process_original_language_no_api_when_capacity_exhausted(self):
+        proc = make_lm_processor()
+        proc.client.chat.completions.create.return_value = self._mock_completion("should not run")
+
+        with patch("trns.bot.utils.get_current_token", return_value="fake-key"), \
+             patch("trns.bot.utils.decrement_daily_capacity", return_value=False):
+            result = proc.process_original_language("hello world", "en")
+
+        assert result is None
+        proc.client.chat.completions.create.assert_not_called()
+
+    def test_get_token_and_decrement_returns_none_when_capacity_false(self):
+        proc = make_lm_processor()
+        with patch("trns.bot.utils.get_current_token", return_value="fake-key"), \
+             patch("trns.bot.utils.decrement_daily_capacity", return_value=False):
+            assert proc._get_token_and_decrement() is None

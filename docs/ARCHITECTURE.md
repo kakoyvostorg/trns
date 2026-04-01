@@ -44,9 +44,21 @@ Entry point: `trns <url>` (or `python -m trns.transcription.main`)
 
 **Files:**
 - `server.py` — FastAPI app, webhook endpoint, Pyrogram client lifecycle
-- `routes.py` — message/command handlers, pipeline orchestration
+- `routes/` — package: message/command handlers and pipeline orchestration (see below)
 - `utils.py` — auth, token management, config, capacity tracking
 - `output_handler.py` — Telegram message sending with rate limiting
+
+**`trns.bot.routes` package** (public API re-exported from `routes/__init__.py`; imports like `from trns.bot import routes` are unchanged):
+
+| Module | Responsibility |
+|--------|----------------|
+| `_state.py` | Shared locks, `user_processing_tasks`, conversation state, `TRNS_HOME` path resolution for args |
+| `_commands.py` | `/start`, `/cancel`, `/stats`, cooperative `cancel_user_processing` |
+| `_processing.py` | URL detection, `_run_pipeline_with_output`, `_process_url_video`, `process_video_file` |
+| `_handlers.py` | Text/video messages, inline keyboard callbacks |
+| `_dispatcher.py` | `route_update` — dispatches Pyrogram updates to handlers |
+
+**Design note (uploads vs URLs):** YouTube, Twitter/X, and **uploaded Telegram videos** share one orchestration path: `_process_url_video` / `process_video_file` call `_run_pipeline_with_output`, which runs `TranscriptionPipeline` with `video_id` set to the extracted ID, the page URL, or a **local file path** (uploads). The pipeline treats existing files as local input, skips YouTube subtitles, and runs Whisper/LM like URL jobs. Compared to the older upload-only codepath, audio extraction and decoding now follow the pipeline (yt-dlp/FFmpeg), full-video Whisper uses its default beam size (e.g. 5), and text formatting follows `_output_transcription` / `_output_lm_report`.
 
 **How webhook processing works:**
 
@@ -138,6 +150,8 @@ Note: `config.json` values are applied on top of CLI defaults. To override a con
 
 All relative file paths (`api_key.txt`, `prompt.md`, etc.) resolve against `TRNS_HOME` environment variable, which defaults to the current working directory.
 
+For the **CLI**, if you do not pass `--config`, the config file is `CONFIG_PATH` if set, otherwise `config.json` (under `TRNS_HOME`), consistent with `trns.transcription.main.load_config(None)`. Passing `--config /path/to/file.json` selects that file explicitly and does not use `CONFIG_PATH`.
+
 ## Threading Model
 
 ### CLI
@@ -178,7 +192,13 @@ src/trns/
 │   └── subtitle_extractor.py   # YouTube captions extraction
 ├── bot/
 │   ├── server.py            # FastAPI app, webhook, Pyrogram client
-│   ├── routes.py            # Message handlers, pipeline launching
+│   ├── routes/              # Bot handlers package (see Components §2)
+│   │   ├── __init__.py      # Re-exports route_update, cancel_user_processing, etc.
+│   │   ├── _state.py
+│   │   ├── _commands.py
+│   │   ├── _processing.py
+│   │   ├── _handlers.py
+│   │   └── _dispatcher.py
 │   ├── utils.py             # Auth, tokens, config, capacity
 │   └── output_handler.py    # Telegram message sending
 └── cli/

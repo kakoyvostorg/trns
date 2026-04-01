@@ -23,17 +23,13 @@ class YouTubeSubtitleExtractor:
         self.last_timestamp = 0.0
         
     def extract_video_id(self, url_or_id: str) -> str:
-        """Extract video ID from YouTube URL or return if already an ID"""
-        if "youtube.com" in url_or_id or "youtu.be" in url_or_id:
-            # Extract from URL
-            if "v=" in url_or_id:
-                video_id = url_or_id.split("v=")[-1].split("&")[0]
-            elif "youtu.be/" in url_or_id:
-                video_id = url_or_id.split("youtu.be/")[-1].split("?")[0]
-            else:
-                raise ValueError(f"Could not extract video ID from URL: {url_or_id}")
-            return video_id
-        return url_or_id
+        """Extract video ID from YouTube URL or return if already an ID.
+
+        Delegates to the shared pipeline helper so all URL formats
+        (/watch, /live/, /embed/, /shorts/, youtu.be) stay in sync.
+        """
+        from .pipeline import extract_video_id as _extract
+        return _extract(url_or_id)
     
     def check_subtitles_available(self) -> Tuple[bool, List[str]]:
         """
@@ -76,7 +72,7 @@ class YouTubeSubtitleExtractor:
                     YouTubeTranscriptApi.get_transcript(self.video_id, languages=[lang])
                     available_languages.append(lang)
                     break  # Found at least one, that's enough
-                except:
+                except Exception:
                     continue
             
             return len(available_languages) > 0, available_languages
@@ -119,7 +115,7 @@ class YouTubeSubtitleExtractor:
                         transcript_data = transcript_list.find_transcript(['en', 'en-US', 'en-GB'])
                         transcript = transcript_data.fetch()
                         logger.info(f"Using transcript in language: {transcript_data.language_code}")
-                    except:
+                    except Exception:
                         # Try to get any available transcript
                         try:
                             transcript_list = YouTubeTranscriptApi.list_transcripts(self.video_id)

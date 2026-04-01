@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "trns"
-version = "0.2.0"
+version = "0.2.1"
 description = "Transcription and summarization tool for YouTube, Twitter/X.com videos, and local files with automatic translation and language model processing"
 readme = "README.md"
 requires-python = ">=3.8"
@@ -64,7 +64,7 @@ Issues = "https://github.com/kakoyvostorg/trns/issues"
 
 [tool.setuptools]
 package-dir = {"" = "src"}
-packages = ["trns", "trns.bot", "trns.transcription", "trns.cli"]
+packages = ["trns", "trns.bot", "trns.bot.routes", "trns.transcription", "trns.cli"]
 
 [tool.setuptools.package-data]
 trns = ["*.json", "*.md", "*.txt"]

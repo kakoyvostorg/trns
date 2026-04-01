@@ -55,3 +55,33 @@ class TestExtractVideoId:
 
     def test_arbitrary_string_passthrough(self):
         assert extract_video_id("not-a-url") == "not-a-url"
+
+    # --- /live/ URLs ---
+
+    def test_live_url(self):
+        assert extract_video_id("https://www.youtube.com/live/dQw4w9WgXcQ") == "dQw4w9WgXcQ"
+
+    def test_live_url_with_query(self):
+        assert extract_video_id("https://www.youtube.com/live/dQw4w9WgXcQ?si=token123") == "dQw4w9WgXcQ"
+
+    def test_live_url_no_www(self):
+        assert extract_video_id("https://youtube.com/live/abc_123-XYZ") == "abc_123-XYZ"
+
+    # --- /embed/ URLs ---
+
+    def test_embed_url(self):
+        assert extract_video_id("https://www.youtube.com/embed/dQw4w9WgXcQ") == "dQw4w9WgXcQ"
+
+    def test_embed_url_with_query(self):
+        assert extract_video_id("https://www.youtube.com/embed/dQw4w9WgXcQ?autoplay=1&rel=0") == "dQw4w9WgXcQ"
+
+    def test_embed_url_no_www(self):
+        assert extract_video_id("https://youtube.com/embed/abc_123-XYZ") == "abc_123-XYZ"
+
+    # --- /shorts/ URLs ---
+
+    def test_shorts_url(self):
+        assert extract_video_id("https://www.youtube.com/shorts/dQw4w9WgXcQ") == "dQw4w9WgXcQ"
+
+    def test_shorts_url_with_query(self):
+        assert extract_video_id("https://youtube.com/shorts/dQw4w9WgXcQ?feature=share") == "dQw4w9WgXcQ"

@@ -4,7 +4,12 @@ Tests for config loading and apply_config_to_args (trns.transcription.main).
 
 import json
 import pytest
-from trns.transcription.main import apply_config_to_args, load_config, create_default_config
+from trns.transcription.main import (
+    apply_config_to_args,
+    create_default_config,
+    load_config,
+    resolved_config_path_for_cli,
+)
 
 
 class TestApplyConfigToArgs:
@@ -107,6 +112,33 @@ class TestLoadConfig:
         path = tmp_path / "bad.json"
         path.write_text("{not valid json", encoding="utf-8")
         assert load_config(str(path)) is None
+
+    def test_none_uses_config_path_env(self, tmp_path, monkeypatch):
+        """Omitted CLI path: load_config(None) honors CONFIG_PATH."""
+        p = tmp_path / "from_env.json"
+        p.write_text(json.dumps({"method": "subtitles"}), encoding="utf-8")
+        monkeypatch.setenv("CONFIG_PATH", str(p))
+        assert load_config(None)["method"] == "subtitles"
+
+    def test_explicit_path_ignores_config_path(self, tmp_path, monkeypatch):
+        """Explicit path wins over CONFIG_PATH (same file as trns --config ...)."""
+        env_file = tmp_path / "from_env.json"
+        env_file.write_text(json.dumps({"method": "from_env"}), encoding="utf-8")
+        explicit_file = tmp_path / "explicit.json"
+        explicit_file.write_text(json.dumps({"method": "whisper"}), encoding="utf-8")
+        monkeypatch.setenv("CONFIG_PATH", str(env_file))
+        assert load_config(str(explicit_file))["method"] == "whisper"
+
+
+class TestResolvedConfigPathForCli:
+    def test_omitted_flag_uses_env(self, tmp_path, monkeypatch):
+        p = tmp_path / "cfg.json"
+        monkeypatch.setenv("CONFIG_PATH", str(p))
+        assert resolved_config_path_for_cli(False, None) == str(p)
+
+    def test_explicit_flag_uses_cli_value(self, tmp_path):
+        p = str(tmp_path / "mine.json")
+        assert resolved_config_path_for_cli(True, p) == p
 
 
 class TestCreateDefaultConfig:
