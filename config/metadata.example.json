@@ -7,10 +7,7 @@
       "invalid_key": "Неверный ключ. Попробуйте снова.",
       "auth_success": "Аутентификация успешна! Теперь вы можете использовать бота.",
       "context_button": "Контекст",
-      "add_token_button": "Добавить токен",
       "cancel_button": "Отмена",
-      "enter_tokens": "Введите один или несколько токенов, каждый с новой строки:",
-      "tokens_added": "Токены успешно добавлены.",
       "enter_context": "Введите контекст:",
       "context_set": "Контекст установлен.",
       "context_reset": "Контекст сброшен.",
@@ -32,17 +29,14 @@
       "token_warning": "⚠️ Внимание: осталось менее 50 запросов!",
       "token_exhausted": "Токен исчерпан, переключаюсь на следующий...",
       "token_429_error": "Получена ошибка 429 (слишком много запросов), переключаюсь на следующий токен...",
-      "no_tokens_available": "Нет доступных токенов. Добавьте токены через кнопку 'Добавить токен'."
+      "no_tokens_available": "Нет доступных токенов. Добавьте токены в api_key.txt или задайте OPENROUTER_API_KEY."
     },
     "en": {
       "start_message": "Welcome! Please enter the authentication key.",
       "invalid_key": "Invalid key. Please try again.",
       "auth_success": "Authentication successful! You can now use the bot.",
       "context_button": "Context",
-      "add_token_button": "Add Token",
       "cancel_button": "Cancel",
-      "enter_tokens": "Enter one or more tokens, each starting from a new line:",
-      "tokens_added": "Tokens added successfully.",
       "enter_context": "Enter context:",
       "context_set": "Context set.",
       "context_reset": "Context reset.",
@@ -64,7 +58,7 @@
       "token_warning": "⚠️ Warning: Less than 50 requests remaining!",
       "token_exhausted": "Token exhausted, switching to next...",
       "token_429_error": "Received 429 error (too many requests), switching to next token...",
-      "no_tokens_available": "No tokens available. Add tokens via 'Add Token' button."
+      "no_tokens_available": "No tokens available. Add tokens to api_key.txt or set OPENROUTER_API_KEY."
     }
   }
 }
