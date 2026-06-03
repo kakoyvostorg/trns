@@ -130,13 +130,25 @@ The core orchestrator. ~1300 lines covering:
 - **Client refresh**: detects when token has changed and reinitializes the OpenAI client
 - **Bilingual mode**: two prompts — one for original language, one for Russian
 - **Prompt files**: `prompt.md` (Russian), `prompt_original.md` (original language)
+- **Video metadata prefix**: title + description (truncated to `--video-metadata-chars`) are wrapped in a `<video_metadata note="Untrusted...">` block and injected between the prompt and the transcript on every call
+- **Timecode-in-summary mode**: when `--timecode-in-summary` is on, `_serialize_window_with_timecodes` interleaves sparse `[MM:SS]` markers (≥`timecode_min_interval_seconds` apart) into the transcript window, and a short bilingual instruction is appended to both prompts at load time
+
+### 5a. Anchor sidecars (timecode mode)
+
+Timecode mode uses a **sidecar** data shape: the `text` / `translated` fields stay plain strings, and a parallel `anchors` / `anchors_translated` list carries `{offset, time}` markers where `offset` is a char index into the text and `time` is the video-absolute second (for live streams, seconds since the start of capture).
+
+- **Builder**: `pipeline._build_anchors(segments, chunk_start=0.0)` accepts whisper `Segment` objects or `{start, end, text}` dicts and returns `(text, anchors)`. It reproduces the existing `" ".join(...).strip()` text contract so consumers that ignore anchors see no difference
+- **Chunk-start convention**: 0 for full-video; `self.current_time_position` (pre-increment) for chunked non-live; `self.live_capture_seconds` counter for live streams
+- **Translated-side anchors**: `WhisperTranscriber.translate_segments_to_russian` batches translations with a `\n|||\n` separator (and falls back to per-segment translation on split mismatch), returning segments that preserve the original timings with Russian text, from which a second `anchors_translated` list is built
+- **CLI render**: `_output_transcription` prepends one timecode per emit (head anchor of the current result); the subtitle path wires the prefix inline using the same helper
+- **LM render**: sparse markers are injected only inside the LM window — not in the raw text buffer — keeping the existing sentence-buffer logic unchanged
 
 ### 6. Utils (`trns.bot.utils`)
 
-- `get_current_token()` / `decrement_daily_capacity()` — token rotation + capacity
-- `load_metadata()` / `save_metadata()` — thread-safe metadata I/O
+- `get_current_token()` / `decrement_daily_capacity()` — token selection + daily capacity in runtime `state/global.json`
+- `load_metadata()` — localization/default metadata from `metadata.json`
 - `get_text(metadata, key)` — localized string lookup from `metadata.json`
-- User settings (per-user preferences stored in `user_settings.json`)
+- User state (auth/settings/context stored in `state/users/<telegram_id>.json`; `config.json` `allowed_user_ids` is legacy/preauthorization fallback)
 
 ## Configuration Priority
 
@@ -148,7 +160,7 @@ Exception: `--url` on command line always wins over `config.json` URL.
 
 Note: `config.json` values are applied on top of CLI defaults. To override a config value from the CLI, pass the flag explicitly (e.g., `--whisper-model large`).
 
-All relative file paths (`api_key.txt`, `prompt.md`, etc.) resolve against `TRNS_HOME` environment variable, which defaults to the current working directory.
+All relative file paths (`api_key.txt`, `prompt.md`, etc.) resolve against `TRNS_HOME` environment variable, which defaults to the current working directory. Mutable runtime state resolves under `TRNS_STATE_DIR`, defaulting to `state/` under `TRNS_HOME`.
 
 For the **CLI**, if you do not pass `--config`, the config file is `CONFIG_PATH` if set, otherwise `config.json` (under `TRNS_HOME`), consistent with `trns.transcription.main.load_config(None)`. Passing `--config /path/to/file.json` selects that file explicitly and does not use `CONFIG_PATH`.
 

@@ -6,6 +6,21 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.0.0/). Versioning: [S
 
 ## [Unreleased]
 
+### Added
+- **Video metadata in LM prompt**: title + description of the source video are now captured via `yt-dlp` and prepended to every LM call, wrapped in a `<video_metadata note="Untrusted...">` block so the model treats it as context rather than instructions. Description is truncated to `--video-metadata-chars` (default 2000) chars; set to 0 to disable
+- **Timecode mode (`--timecode`)**: prefixes each emitted transcription line with `[MM:SS]` (or `[HH:MM:SS]` on videos ≥1h). Works in the full-video, chunked, live, and subtitle code paths. For live streams timecodes are relative to the start of capture
+- **Timecodes in LM summary (`--timecode-in-summary`)**: interleaves sparse `[MM:SS]` markers into the transcript window sent to the LM, and appends a short bilingual instruction to the prompt asking the model to cite them when referencing moments. Marker spacing is tunable via `--timecode-min-interval-seconds` (default 30)
+- **Segment-aligned translation**: `WhisperTranscriber.translate_segments_to_russian` batches Google Translate calls with a `\n|||\n` separator and per-segment fallback on split mismatch. Returns translated segments that preserve each original segment's timing, enabling anchors on the Russian side
+- **Anchor sidecars on transcription dicts**: each dict now optionally carries `anchors` / `anchors_translated` — lists of `{offset, time}` markers into the respective text. Text shape is unchanged; consumers that don't care about timing ignore them
+- **Production security mode**: `TRNS_ENV=production` now requires `WEBHOOK_SECRET` and `ADMIN_TOKEN` at startup; local/default development mode remains permissive for test deploys
+- **Runtime state directory**: bot auth/settings/context now live in `state/users/<telegram_id>.json`; daily LM capacity lives in `state/global.json`; `TRNS_STATE_DIR` can override the location
+
+### Changed
+- **`WhisperTranscriber.transcribe_audio` return shape**: now a 4-tuple `(text, language, prob, segments)`, where `segments` is a list of `{start, end, text}` dicts. All existing callers have been updated
+- **Python support**: supported/tested Python versions are now 3.11, 3.12, and 3.13
+- **CI**: GitHub Actions now runs unit tests on Python 3.11/3.12/3.13 and enforces `ruff check .`
+- **Anchor smoke check**: `scripts/check_anchors.py` became `scripts/dev_check_anchors.py`, a documented manual dev utility that avoids LM calls by default
+
 ## [0.2.1] - 2026-04-02
 
 ### Fixed
