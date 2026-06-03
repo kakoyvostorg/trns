@@ -3,7 +3,7 @@ Tests for config loading and apply_config_to_args (trns.transcription.main).
 """
 
 import json
-import pytest
+
 from trns.transcription.main import (
     apply_config_to_args,
     create_default_config,

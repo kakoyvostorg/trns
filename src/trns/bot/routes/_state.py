@@ -26,6 +26,10 @@ def _resolve_args_paths(args):
     args.lm_prompt_file = _resolve(getattr(args, "lm_prompt_file", "prompt.md"))
     args.lm_prompt_original_file = _resolve(getattr(args, "lm_prompt_original_file", "prompt_original.md"))
     args.metadata_path = _resolve(getattr(args, "metadata_path", "metadata.json"))
+    state_dir = os.environ.get("TRNS_STATE_DIR", "state")
+    if not os.path.isabs(state_dir):
+        state_dir = os.path.join(_trns_home, state_dir)
+    args.capacity_path = os.path.join(state_dir, "global.json")
     if getattr(args, "save_transcript", None):
         args.save_transcript = _resolve(args.save_transcript)
     return args

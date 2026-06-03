@@ -78,6 +78,10 @@ export TELEGRAM_API_ID=your_api_id_here
 export TELEGRAM_API_HASH=your_api_hash_here
 export AUTH_KEY=your_auth_key_here
 export OPENROUTER_API_KEY=your_openrouter_api_key
+# For public production deployments:
+# export TRNS_ENV=production
+# export WEBHOOK_SECRET=your_random_webhook_secret
+# export ADMIN_TOKEN=your_admin_token
 ```
 
 **Getting Telegram API Credentials:**
@@ -88,7 +92,7 @@ export OPENROUTER_API_KEY=your_openrouter_api_key
 5. Copy your `api_id` and `api_hash`
 
 **User Authentication:**
-Users authenticate by sending the `AUTH_KEY` to the bot. After successful authentication, their user ID is automatically stored in `config.json` and they remain authenticated.
+Users authenticate by sending the `AUTH_KEY` to the bot. After successful authentication, their user state is stored under `TRNS_STATE_DIR` (`state/users/<telegram_id>.json` by default) and they remain authenticated.
 
 #### Method B: File-based Configuration
 
@@ -158,7 +162,7 @@ See [DEPLOYMENT.md](DEPLOYMENT.md) for cloud deployment instructions.
 ### Authentication Issues
 
 - Verify `AUTH_KEY` or `key.txt` matches what you're sending
-- Check `config.json` `allowed_user_ids` field includes your user ID
+  - Check `state/users/<telegram_id>.json` exists and has `"authenticated": true`; `config.json` `allowed_user_ids` is only for legacy/preauthorized users
 - Your Telegram user ID can be found by messaging [@userinfobot](https://t.me/userinfobot)
 
 ### Transcription Errors
@@ -185,4 +189,3 @@ python -m trns.bot.server
 - Read [DEPLOYMENT.md](DEPLOYMENT.md) for production deployment
 - Check [ARCHITECTURE.md](ARCHITECTURE.md) for system architecture
 - See [USER_GUIDE_RU.md](USER_GUIDE_RU.md) for Telegram bot usage guide (Russian)
-

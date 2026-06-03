@@ -6,34 +6,33 @@ All filesystem operations use pytest's tmp_path to stay isolated.
 """
 
 import json
-import pytest
+from datetime import datetime, timezone
 from unittest.mock import patch
-from datetime import date, datetime, timezone
+
+import pytest
 
 from trns.bot.utils import (
-    get_text,
-    load_auth_key,
-    load_config,
-    is_user_authenticated,
-    add_authenticated_user,
-    load_tokens,
-    save_tokens,
-    add_tokens,
-    get_current_token,
-    get_daily_capacity,
-    decrement_daily_capacity,
-    check_capacity_at_start,
-    check_token_warning,
-    get_token_count,
-    load_user_settings,
-    save_user_settings,
-    get_user_setting,
-    set_user_setting,
-    initialize_user_settings,
     DAILY_CAPACITY,
     WARNING_THRESHOLD,
+    add_authenticated_user,
+    add_tokens,
+    check_capacity_at_start,
+    check_token_warning,
+    decrement_daily_capacity,
+    get_current_token,
+    get_daily_capacity,
+    get_text,
+    get_token_count,
+    get_user_setting,
+    initialize_user_settings,
+    is_user_authenticated,
+    load_auth_key,
+    load_tokens,
+    load_user_settings,
+    save_tokens,
+    save_user_settings,
+    set_user_setting,
 )
-
 
 # ---------------------------------------------------------------------------
 # get_text
@@ -95,6 +94,11 @@ class TestIsUserAuthenticated:
     def test_missing_config_returns_false(self, tmp_path):
         assert is_user_authenticated(111, config_path=str(tmp_path / "no.json")) is False
 
+    def test_per_user_state_returns_true(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("TRNS_STATE_DIR", str(tmp_path / "state"))
+        add_authenticated_user(444)
+        assert is_user_authenticated(444, config_path=str(tmp_path / "missing.json")) is True
+
 
 # ---------------------------------------------------------------------------
 # add_authenticated_user
@@ -117,6 +121,15 @@ class TestAddAuthenticatedUser:
         cfg = json.loads(open(config_file, encoding="utf-8").read())
         assert 111 in cfg["allowed_user_ids"]
         assert 222 in cfg["allowed_user_ids"]
+
+    def test_default_writes_per_user_state(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("TRNS_STATE_DIR", str(tmp_path / "state"))
+        add_authenticated_user(333)
+
+        user_file = tmp_path / "state" / "users" / "333.json"
+        data = json.loads(user_file.read_text(encoding="utf-8"))
+        assert data["authenticated"] is True
+        assert data["settings"] == {}
 
 
 # ---------------------------------------------------------------------------
@@ -264,6 +277,15 @@ class TestDailyCapacity:
         path = self._write_metadata(tmp_path, 100, today)
         assert check_token_warning(path) is False
 
+    def test_default_capacity_uses_runtime_state_dir(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("TRNS_STATE_DIR", str(tmp_path / "state"))
+        assert get_daily_capacity() == DAILY_CAPACITY
+
+        state_file = tmp_path / "state" / "global.json"
+        data = json.loads(state_file.read_text(encoding="utf-8"))
+        assert data["daily_capacity"] == DAILY_CAPACITY
+        assert data["last_capacity_date"] == datetime.now(timezone.utc).date().isoformat()
+
 
 # ---------------------------------------------------------------------------
 # User settings
@@ -317,3 +339,16 @@ class TestUserSettings:
         initialize_user_settings(99, settings_path=path)
         # Should NOT reset to True
         assert get_user_setting(99, "show_transcription", settings_path=path) is False
+
+    def test_default_settings_use_per_user_state(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("TRNS_STATE_DIR", str(tmp_path / "state"))
+        initialize_user_settings(99)
+        set_user_setting(99, "context", "demo")
+
+        assert get_user_setting(99, "show_original_translation") is True
+        assert get_user_setting(99, "show_transcription") is True
+        assert get_user_setting(99, "context") == "demo"
+
+        user_file = tmp_path / "state" / "users" / "99.json"
+        data = json.loads(user_file.read_text(encoding="utf-8"))
+        assert data["settings"]["context"] == "demo"

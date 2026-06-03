@@ -4,7 +4,7 @@ import logging
 from pyrogram import Client
 from pyrogram.types import Update
 
-from ._commands import start_command, cancel_command, stats_command
+from ._commands import cancel_command, start_command, stats_command
 from ._handlers import handle_text_message, handle_video_message
 
 logger = logging.getLogger(__name__)
@@ -17,9 +17,9 @@ async def route_update(client: Client, update: Update):
         if not update.message:
             logger.debug("Update has no message, ignoring")
             return
-        
+
         message = update.message
-        
+
         # Handle commands
         if message.text and message.text.startswith('/'):
             raw_command = message.text.split()[0].lower()
@@ -35,19 +35,19 @@ async def route_update(client: Client, update: Update):
                 # Unknown command
                 logger.debug(f"Unknown command: {command}")
             return
-        
+
         # Handle text messages
         if message.text:
             await handle_text_message(client, message)
             return
-        
+
         # Handle video messages
         if message.video or (message.document and message.document.mime_type and 'video' in message.document.mime_type):
             await handle_video_message(client, message)
             return
-        
+
         # If we get here, it's an unsupported message type
         logger.debug(f"Unsupported message type from user {message.from_user.id}")
-        
+
     except Exception as e:
         logger.exception(f"Error routing update: {e}")

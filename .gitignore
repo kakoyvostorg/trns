@@ -81,6 +81,7 @@ __pycache__/
 # Generated / local-only
 output/
 tmp/
+state/
 
 
 # Claude agent settings

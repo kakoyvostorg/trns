@@ -56,11 +56,11 @@ Yandex Serverless Containers is ideal for webhook-based bots as it provides:
    yc serverless container revision deploy \
      --container-name trns-bot \
      --image cr.yandex/${REGISTRY_ID}/trns:latest \
-     --environment BOT_TOKEN=your_token,TELEGRAM_API_ID=your_api_id,TELEGRAM_API_HASH=your_api_hash,AUTH_KEY=your_key,OPENROUTER_API_KEY=your_key \
+     --environment BOT_TOKEN=your_token,TELEGRAM_API_ID=your_api_id,TELEGRAM_API_HASH=your_api_hash,AUTH_KEY=your_key,OPENROUTER_API_KEY=your_key,TRNS_ENV=production,WEBHOOK_SECRET=your_webhook_secret,ADMIN_TOKEN=your_admin_token \
      --service-account-id YOUR_SERVICE_ACCOUNT_ID
    ```
    
-   **Note:** You must obtain `TELEGRAM_API_ID` and `TELEGRAM_API_HASH` from https://my.telegram.org before deployment. Users authenticate with `AUTH_KEY` and are automatically added to `config.json`.
+   **Note:** You must obtain `TELEGRAM_API_ID` and `TELEGRAM_API_HASH` from https://my.telegram.org before deployment. Users authenticate with `AUTH_KEY`; runtime auth/settings are stored under `TRNS_STATE_DIR`.
 
 5. **Get Container URL:**
    ```bash
@@ -71,6 +71,7 @@ Yandex Serverless Containers is ideal for webhook-based bots as it provides:
    ```bash
    CONTAINER_URL=$(yc serverless container get --name trns-bot --format json | jq -r '.url')
    curl -X POST "${CONTAINER_URL}/set_webhook" \
+     -H "Authorization: Bearer ${ADMIN_TOKEN}" \
      -H "Content-Type: application/json" \
      -d "{\"webhook_url\": \"${CONTAINER_URL}/webhook\"}"
    ```
@@ -155,10 +156,11 @@ For more control, deploy to a VM:
    Environment="TELEGRAM_API_HASH=your_api_hash"
    Environment="AUTH_KEY=your_key"
    Environment="OPENROUTER_API_KEY=your_key"
+   Environment="TRNS_ENV=production"
    # Webhook security (strongly recommended):
    Environment="WEBHOOK_SECRET=your_random_secret"
    Environment="ADMIN_TOKEN=your_admin_token"
-   # Note: allowed user IDs are managed via config.json (allowed_user_ids field)
+   # Runtime user auth/settings are stored under TRNS_STATE_DIR (state/ by default).
    ExecStart=/usr/bin/python3 -m trns.bot.server
    Restart=always
    
@@ -208,7 +210,7 @@ For more control, deploy to a VM:
    BOT_TOKEN=your_token
    AUTH_KEY=your_key
    OPENROUTER_API_KEY=your_key
-   # Note: allowed user IDs are managed via config.json (allowed_user_ids field)
+   TRNS_ENV=production
 
    # Webhook security (strongly recommended for internet-facing deployments):
    WEBHOOK_SECRET=your_random_secret   # Validates X-Telegram-Bot-Api-Secret-Token on incoming updates
@@ -229,8 +231,11 @@ docker run -d \
   -e BOT_TOKEN=your_token \
   -e AUTH_KEY=your_key \
   -e OPENROUTER_API_KEY=your_key \
-  # Note: allowed user IDs are managed via config.json (allowed_user_ids field)
-
+  -e TRNS_ENV=production \
+  -e WEBHOOK_SECRET=your_random_secret \
+  -e ADMIN_TOKEN=your_admin_token \
+  -e TRNS_HOME=/app/config \
+  -e TRNS_STATE_DIR=/app/config/state \
   -v $(pwd)/config:/app/config \
   trns:latest
 ```
@@ -299,7 +304,7 @@ Use Yandex Application Load Balancer for multiple VMs or scale manually.
 1. **Use environment variables** instead of files for secrets
 2. **Use Yandex Lockbox** for production secrets
 3. **Enable HTTPS** (use Yandex Application Load Balancer or Cloudflare)
-4. **Restrict allowed user IDs** in `config.json` (`allowed_user_ids` field)
+4. **Keep runtime state private**: authenticated users/settings live under `TRNS_STATE_DIR` (`state/` by default); `config.json` `allowed_user_ids` is only for legacy/preauthorized users
 5. **Regular updates:** Keep dependencies updated
 6. **Monitor logs** for suspicious activity
 
@@ -330,4 +335,3 @@ Use Yandex Application Load Balancer for multiple VMs or scale manually.
 - Set appropriate concurrency limits
 - Use caching for repeated transcriptions
 - Monitor and optimize resource usage
-

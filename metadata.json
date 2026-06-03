@@ -82,10 +82,5 @@
       "token_429_error": "Received 429 error (too many requests), switching to next token...",
       "no_tokens_available": "No tokens available. Add tokens via 'Add Token' button."
     }
-  },
-  "token_capacities": {
-    "0": 37
-  },
-  "daily_capacity": 998,
-  "last_capacity_date": "2026-03-27"
+  }
 }

@@ -15,9 +15,9 @@ from fastapi import FastAPI, Request, Response
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from pyrogram import Client
-from pyrogram.types import ReplyKeyboardMarkup, KeyboardButton
+from pyrogram.types import KeyboardButton, ReplyKeyboardMarkup
 
-from trns.bot.utils import load_metadata, get_text, get_user_setting, _resolve_path
+from trns.bot.utils import _resolve_path, get_text, get_user_setting, load_metadata
 
 # Configure logging
 logging.basicConfig(
@@ -41,6 +41,35 @@ _webhook_secret: Optional[str] = os.getenv("WEBHOOK_SECRET")
 # an Authorization: Bearer <token> header.
 _admin_token: Optional[str] = os.getenv("ADMIN_TOKEN")
 
+_environment = (
+    os.getenv("TRNS_ENV")
+    or os.getenv("APP_ENV")
+    or os.getenv("ENVIRONMENT")
+    or "development"
+).lower()
+
+
+def _is_production() -> bool:
+    """Return True when production hardening should be required."""
+    return _environment in {"prod", "production"}
+
+
+def _validate_production_security():
+    """Fail fast when an internet-facing deployment forgot required secrets."""
+    if not _is_production():
+        return
+    missing = []
+    if not _webhook_secret:
+        missing.append("WEBHOOK_SECRET")
+    if not _admin_token:
+        missing.append("ADMIN_TOKEN")
+    if missing:
+        raise RuntimeError(
+            "Production mode requires: "
+            + ", ".join(missing)
+            + ". Set TRNS_ENV=development for local testing."
+        )
+
 
 def get_bot_token(bot_key_path: str = "bot_key.txt") -> str:
     """Load bot token from environment variable or file"""
@@ -48,7 +77,7 @@ def get_bot_token(bot_key_path: str = "bot_key.txt") -> str:
     token = os.getenv("BOT_TOKEN")
     if token:
         return token.strip()
-    
+
     # Fallback to file
     bot_key_path = _resolve_path(bot_key_path)
     try:
@@ -88,46 +117,46 @@ def create_keyboard(metadata: dict, user_id: Optional[int] = None) -> ReplyKeybo
     """
     Create persistent keyboard with buttons.
     If user_id is provided, includes dynamic toggle buttons based on user settings.
-    
+
     Args:
         metadata: Metadata dict with translations
         user_id: Optional user ID for personalized buttons
-    
+
     Returns:
         ReplyKeyboardMarkup with buttons
     """
     context_btn = KeyboardButton(get_text(metadata, "context_button"))
     cancel_btn = KeyboardButton(get_text(metadata, "cancel_button"))
-    
+
     keyboard = []
-    
+
     # Add toggle buttons if user_id is provided
     if user_id is not None:
         # Get user settings (defaults to True)
         show_original = get_user_setting(user_id, "show_original_translation", default=True)
         show_transcription = get_user_setting(user_id, "show_transcription", default=True)
-        
+
         # Toggle button for original translation
         if show_original:
             original_btn_text = get_text(metadata, "hide_original_translation_button")
         else:
             original_btn_text = get_text(metadata, "show_original_translation_button")
         original_btn = KeyboardButton(original_btn_text)
-        
+
         # Toggle button for transcription
         if show_transcription:
             transcription_btn_text = get_text(metadata, "hide_transcription_button")
         else:
             transcription_btn_text = get_text(metadata, "show_transcription_button")
         transcription_btn = KeyboardButton(transcription_btn_text)
-        
+
         # Add toggle buttons in first row (side by side)
         keyboard.append([original_btn, transcription_btn])
-    
+
     # Add context and cancel buttons
     keyboard.append([context_btn])
     keyboard.append([cancel_btn])
-    
+
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
 
 
@@ -202,20 +231,22 @@ class SimpleUpdate:
 async def lifespan(app: FastAPI):
     """Lifespan context manager for FastAPI app"""
     global bot_client, bot_metadata, bot_keyboard
-    
+
     # Startup: Initialize bot client
     try:
+        _validate_production_security()
+
         bot_token = get_bot_token()
         api_id = get_api_id()
         api_hash = get_api_hash()
         logger.info("Bot credentials loaded successfully")
-        
+
         bot_metadata = load_metadata()
         logger.info("Metadata loaded successfully")
-        
+
         # Create default keyboard without user_id (will be recreated per user)
         bot_keyboard = create_keyboard(bot_metadata, user_id=None)
-        
+
         # Build Pyrogram client with in-memory session to avoid file corruption
         bot_client = Client(
             "trns_bot",
@@ -225,17 +256,17 @@ async def lifespan(app: FastAPI):
             workdir="/tmp",  # Store session files in /tmp for serverless
             in_memory=True  # Use in-memory session to prevent corruption from concurrent access
         )
-        
+
         # Start client
         await bot_client.start()
-        
+
         logger.info("Bot client initialized successfully")
         logger.info("⚠️  IMPORTANT: Bot will not receive updates until webhook is configured!")
         logger.info("   Use POST /set_webhook with your webhook URL to enable the bot.")
         logger.info("   For testing, use ngrok: ngrok http 8000")
-        
+
         yield
-        
+
     except Exception as e:
         logger.exception(f"Error during startup: {e}")
         raise
@@ -244,31 +275,35 @@ async def lifespan(app: FastAPI):
         logger.info("=" * 60)
         logger.info("SHUTTING DOWN - Please wait...")
         logger.info("=" * 60)
-        
+
         try:
-            from trns.bot.routes import user_processing_tasks, processing_lock, cancel_user_processing
-            
+            from trns.bot.routes import (
+                cancel_user_processing,
+                processing_lock,
+                user_processing_tasks,
+            )
+
             with processing_lock:
                 num_tasks = len(user_processing_tasks)
                 user_ids = list(user_processing_tasks.keys())
-            
+
             if num_tasks > 0:
                 logger.info(f"Cancelling {num_tasks} ongoing processing task(s)...")
                 logger.info("This may take up to 10 seconds for active transcriptions...")
-                
+
                 for user_id in user_ids:
                     try:
                         await cancel_user_processing(user_id)
                     except Exception as e:
                         logger.error(f"Error cancelling task for user {user_id}: {e}")
-                
+
                 logger.info("All processing tasks cancelled")
             else:
                 logger.info("No active processing tasks to cancel")
-                
+
         except Exception as e:
             logger.error(f"Error during task cleanup: {e}")
-        
+
         # Shutdown bot client
         if bot_client:
             try:
@@ -277,7 +312,7 @@ async def lifespan(app: FastAPI):
                 logger.info("✓ Bot client shut down successfully")
             except Exception as e:
                 logger.error(f"Error during client shutdown: {e}")
-        
+
         logger.info("=" * 60)
         logger.info("SHUTDOWN COMPLETE")
         logger.info("=" * 60)
@@ -333,22 +368,22 @@ async def webhook(request: Request):
         # Parse update from request (Bot API format)
         update_data = await request.json()
         logger.debug(f"Received update: {update_data.get('update_id', 'unknown')}")
-        
+
         # Check if there's a message in the update
         if "message" not in update_data:
             logger.debug("Received update without message, ignoring")
             return Response(status_code=200)
-        
+
         msg_data = update_data["message"]
         message = BotAPIMessage(bot_client, msg_data)
         update = SimpleUpdate(message)
-        
+
         # Route to handlers
         from trns.bot.routes import route_update
         await route_update(bot_client, update)
-        
+
         return Response(status_code=200)
-        
+
     except Exception as e:
         logger.exception(f"Error processing webhook update: {e}")
         return Response(status_code=200)  # Return 200 to prevent Telegram retries
@@ -387,16 +422,17 @@ async def set_webhook(body: WebhookRequest, request: Request):
             status_code=503,
             content={"error": "Bot client not initialized"}
         )
-    
+
     try:
         # Use Telegram Bot API directly via HTTP (Pyrogram doesn't have webhook methods for bots)
         import aiohttp
         bot_token = get_bot_token()
         telegram_api_url = f"https://api.telegram.org/bot{bot_token}/setWebhook"
-        
+
         payload = {"url": body.webhook_url}
-        if body.secret_token:
-            payload["secret_token"] = body.secret_token
+        secret_token = body.secret_token or _webhook_secret
+        if secret_token:
+            payload["secret_token"] = secret_token
 
         async with aiohttp.ClientSession() as session:
             async with session.post(telegram_api_url, json=payload) as response:
@@ -434,17 +470,17 @@ async def get_webhook_info(request: Request):
             status_code=503,
             content={"error": "Bot client not initialized"}
         )
-    
+
     try:
         # Use Telegram Bot API directly via HTTP (Pyrogram doesn't have webhook methods for bots)
         import aiohttp
         bot_token = get_bot_token()
         telegram_api_url = f"https://api.telegram.org/bot{bot_token}/getWebhookInfo"
-        
+
         async with aiohttp.ClientSession() as session:
             async with session.get(telegram_api_url) as response:
                 result = await response.json()
-                
+
                 if result.get("ok"):
                     info = result.get("result", {})
                     return {
@@ -476,11 +512,11 @@ def main():
         import uvicorn
     except ImportError:
         raise ImportError("uvicorn is required. Install with: pip install uvicorn[standard]")
-    
+
     # Get port from environment or use default
     port = int(os.environ.get("PORT", 8000))
     host = os.environ.get("HOST", "0.0.0.0")
-    
+
     logger.info(f"Starting FastAPI server on {host}:{port}")
     logger.info("=" * 60)
     logger.info("⚠️  SHUTDOWN INSTRUCTIONS:")
@@ -488,11 +524,11 @@ def main():
     logger.info("  2. Wait up to 10 seconds for active transcriptions to stop")
     logger.info("  3. DO NOT press Ctrl+C multiple times!")
     logger.info("=" * 60)
-    
+
     # Let uvicorn handle signals naturally - it will trigger lifespan shutdown
     uvicorn.run(
-        app, 
-        host=host, 
+        app,
+        host=host,
         port=port,
         log_level="info"
     )

@@ -4,11 +4,12 @@ Handles authentication, token management, metadata, and file operations
 """
 
 import json
-import os
-import threading
 import logging
-from typing import Optional, List, Dict, Tuple
+import os
+import tempfile
+import threading
 from datetime import datetime, timezone
+from typing import Dict, List, Optional, Tuple
 
 # Try to load environment variables from .env file
 try:
@@ -32,12 +33,67 @@ _settings_lock = threading.Lock()
 DAILY_CAPACITY = 1000
 WARNING_THRESHOLD = 50
 
+_DEFAULT_USER_SETTINGS_PATH = "user_settings.json"
+_DEFAULT_CAPACITY_STATE_NAME = "global.json"
+
 
 def _resolve_path(path: str) -> str:
     """Resolve a relative path against TRNS_HOME."""
     if path and not os.path.isabs(path):
         return os.path.join(_trns_home, path)
     return path
+
+
+def _state_dir() -> str:
+    """Return the runtime state directory, resolved under TRNS_HOME when relative."""
+    configured = os.environ.get("TRNS_STATE_DIR", "state")
+    return _resolve_path(configured)
+
+
+def _state_path(*parts: str) -> str:
+    """Return a path below the runtime state directory."""
+    return os.path.join(_state_dir(), *parts)
+
+
+def _user_state_path(user_id: int) -> str:
+    """Return the per-user state file path for a Telegram user."""
+    return _state_path("users", f"{int(user_id)}.json")
+
+
+def _default_capacity_path() -> str:
+    """Return the global runtime capacity state file path."""
+    return _state_path(_DEFAULT_CAPACITY_STATE_NAME)
+
+
+def _write_json_atomic(path: str, data: Dict):
+    """Write JSON atomically so partial writes do not corrupt state files."""
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    fd, tmp_path = tempfile.mkstemp(
+        dir=os.path.dirname(path) or ".",
+        prefix=f".{os.path.basename(path)}.",
+        suffix=".tmp",
+    )
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2, ensure_ascii=False)
+            f.write("\n")
+        os.replace(tmp_path, path)
+    except Exception:
+        if os.path.exists(tmp_path):
+            os.remove(tmp_path)
+        raise
+
+
+def _load_json_file(path: str, default: Optional[Dict] = None) -> Dict:
+    """Load a JSON object from disk, returning a shallow default when absent."""
+    if not os.path.exists(path):
+        return dict(default or {})
+    with open(path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    if isinstance(data, dict):
+        return data
+    logger.warning("Expected JSON object in %s, got %s", path, type(data).__name__)
+    return dict(default or {})
 
 
 def load_metadata(metadata_path: str = None) -> Dict:
@@ -84,8 +140,7 @@ def save_metadata(metadata: Dict, metadata_path: str = "metadata.json"):
     """Save metadata to JSON file"""
     metadata_path = _resolve_path(metadata_path)
     try:
-        with open(metadata_path, 'w', encoding='utf-8') as f:
-            json.dump(metadata, f, indent=2, ensure_ascii=False)
+        _write_json_atomic(metadata_path, metadata)
     except Exception as e:
         logger.error(f"Error saving metadata.json: {e}")
         raise
@@ -95,7 +150,7 @@ def get_text(metadata: Dict, key: str, language: str = None) -> str:
     """Get text from metadata by key, using default language if not specified"""
     if language is None:
         language = metadata.get("default_language", "ru")
-    
+
     try:
         return metadata["languages"][language][key]
     except KeyError:
@@ -125,13 +180,36 @@ def load_auth_key(key_path: str = "key.txt") -> str:
         raise
 
 
+def _load_user_state(user_id: int) -> Dict:
+    """Load per-user runtime state from state/users/<telegram_id>.json."""
+    try:
+        return _load_json_file(_user_state_path(user_id), default={})
+    except Exception as e:
+        logger.error("Error loading state for user %s: %s", user_id, e)
+        return {}
+
+
+def _save_user_state(user_id: int, state: Dict):
+    """Persist per-user runtime state."""
+    _write_json_atomic(_user_state_path(user_id), state)
+
+
 def is_user_authenticated(user_id: int, config_path: str = None) -> bool:
-    """Check if user ID is in allowed list (from config.json)"""
-    if config_path is None:
-        config_path = os.getenv("CONFIG_PATH", "config.json")
-    config_path = _resolve_path(config_path)
+    """Check if a user is authenticated.
+
+    Runtime authentication is stored in per-user state files. When an explicit
+    config path is passed, or during migration from older installs, the legacy
+    ``allowed_user_ids`` config field is still honored.
+    """
+    if _load_user_state(user_id).get("authenticated") is True:
+        return True
 
     try:
+        if config_path is None:
+            config_path = os.getenv("CONFIG_PATH", "config.json")
+        config_path = _resolve_path(config_path)
+        if not os.path.exists(config_path):
+            return False
         config = load_config(config_path)
         allowed_ids = config.get("allowed_user_ids", [])
         return user_id in allowed_ids
@@ -140,95 +218,53 @@ def is_user_authenticated(user_id: int, config_path: str = None) -> bool:
         return False
 
 
-def add_authenticated_user(user_id: int, config_path: str = None):
-    """
-    Add user ID to allowed list in config.json with file locking to prevent race conditions.
-
-    This function uses file locking to ensure atomic read-modify-write operations,
-    preventing data loss when multiple users authenticate concurrently.
-    """
-    if config_path is None:
-        config_path = os.getenv("CONFIG_PATH", "config.json")
+def _add_authenticated_user_to_config(user_id: int, config_path: str):
+    """Legacy helper: add user ID to config.json with file locking."""
     config_path = _resolve_path(config_path)
-
-    import tempfile
-    
-    # Import platform-specific locking
     try:
         import fcntl
+
         has_fcntl = True
     except ImportError:
-        # Windows doesn't have fcntl
         has_fcntl = False
-    
-    # Use a lock file to ensure atomic operations
+
     lock_path = config_path + ".lock"
-    
+
     try:
-        # Create lock file if it doesn't exist
-        lock_file = open(lock_path, 'w')
-        
+        lock_file = open(lock_path, "w")
+
         try:
-            # Acquire exclusive lock (blocks until available)
             if has_fcntl:
                 fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
-                logger.debug(f"Acquired lock for config file (fcntl)")
             else:
-                # Windows: use file existence as lock (not perfect but better than nothing)
                 import time
+
                 retry_count = 0
                 while os.path.exists(lock_path + ".active") and retry_count < 50:
                     time.sleep(0.1)
                     retry_count += 1
-                open(lock_path + ".active", 'w').close()
-                logger.debug(f"Acquired lock for config file (file-based)")
-            
-            # Now safely read, modify, and write
+                open(lock_path + ".active", "w").close()
+
             config = load_config(config_path)
-            
-            # Check if already added (inside lock to ensure accuracy)
             if "allowed_user_ids" not in config:
                 config["allowed_user_ids"] = []
-            
+
             if user_id in config["allowed_user_ids"]:
                 logger.info(f"User {user_id} is already authenticated")
                 return
-            
-            # Add user ID
+
             config["allowed_user_ids"].append(user_id)
-            
-            # Atomic write: write to temp file, then rename
-            temp_fd, temp_path = tempfile.mkstemp(
-                dir=os.path.dirname(config_path),
-                prefix=".config_",
-                suffix=".tmp"
-            )
-            
-            try:
-                with os.fdopen(temp_fd, 'w', encoding='utf-8') as f:
-                    json.dump(config, f, indent=2, ensure_ascii=False)
-                
-                # Atomic rename (replaces old file)
-                os.replace(temp_path, config_path)
-                logger.info(f"Added user {user_id} to allowed list in config.json")
-                
-            except Exception as e:
-                # Clean up temp file on error
-                if os.path.exists(temp_path):
-                    os.remove(temp_path)
-                raise
-            
+            _write_json_atomic(config_path, config)
+            logger.info(f"Added user {user_id} to allowed list in config.json")
+
         finally:
-            # Always release lock
             if has_fcntl:
                 fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
             else:
-                # Windows: remove active lock file
                 if os.path.exists(lock_path + ".active"):
                     os.remove(lock_path + ".active")
             lock_file.close()
-            logger.debug(f"Released lock for config file")
-            
+
     except Exception as e:
         logger.error(f"Error adding user to allowed list: {e}")
         raise
@@ -239,6 +275,29 @@ def add_authenticated_user(user_id: int, config_path: str = None):
                 os.remove(lock_path)
         except Exception:
             pass  # Ignore cleanup errors
+
+
+def add_authenticated_user(user_id: int, config_path: str = None):
+    """
+    Add a user to the authenticated set.
+
+    New runtime state is written to ``state/users/<telegram_id>.json``. Passing
+    an explicit config path preserves legacy behavior for migration tools and
+    tests that still operate on ``allowed_user_ids``.
+    """
+    if config_path is not None:
+        _add_authenticated_user_to_config(user_id, config_path)
+        return
+
+    with _settings_lock:
+        state = _load_user_state(user_id)
+        if state.get("authenticated") is True:
+            logger.info(f"User {user_id} is already authenticated")
+            return
+        state["authenticated"] = True
+        state.setdefault("settings", {})
+        _save_user_state(user_id, state)
+        logger.info(f"Added user {user_id} to per-user state")
 
 
 def load_config(config_path: str = None) -> Dict:
@@ -277,17 +336,17 @@ def save_config(config: Dict, config_path: str = "config.json"):
         raise
 
 
-def update_context(user_id: int, context_text: str, settings_path: str = "user_settings.json"):
-    """Update context for a specific user in user_settings.json"""
+def update_context(user_id: int, context_text: str, settings_path: str = None):
+    """Update context for a specific user."""
     set_user_setting(user_id, "context", context_text, settings_path)
 
 
-def reset_context(user_id: int, settings_path: str = "user_settings.json"):
+def reset_context(user_id: int, settings_path: str = None):
     """Reset context to empty string for a specific user"""
     update_context(user_id, "", settings_path)
 
 
-def get_context(user_id: int, settings_path: str = "user_settings.json") -> str:
+def get_context(user_id: int, settings_path: str = None) -> str:
     """Get context for a specific user"""
     return get_user_setting(user_id, "context", default="", settings_path=settings_path)
 
@@ -303,7 +362,7 @@ def load_tokens(api_key_path: str = "api_key.txt") -> List[str]:
     api_key_path = _resolve_path(api_key_path)
     if not os.path.exists(api_key_path):
         return []
-    
+
     try:
         with open(api_key_path, 'r', encoding='utf-8') as f:
             tokens = [line.strip() for line in f if line.strip()]
@@ -329,18 +388,17 @@ def add_tokens(new_tokens: List[str], api_key_path: str = "api_key.txt", metadat
     """Add new tokens to api_key.txt only. Tokens are never stored in JSON."""
     # Load existing tokens
     existing_tokens = load_tokens(api_key_path)
-    
+
     # Add new tokens
     for token in new_tokens:
         token = token.strip()
         if token and token not in existing_tokens:
             existing_tokens.append(token)
-    
+
     # Save tokens to file only (not in JSON)
     save_tokens(existing_tokens, api_key_path)
-    
-    # Note: Capacity is now tracked by date in metadata.json (daily_capacity field)
-    # No need to initialize token_capacities anymore
+
+    # Capacity is tracked in runtime state/global.json, not alongside tokens.
 
 
 def get_current_token(api_key_path: str = "api_key.txt", metadata_path: str = "metadata.json") -> Optional[str]:
@@ -355,64 +413,82 @@ def get_current_token(api_key_path: str = "api_key.txt", metadata_path: str = "m
     return tokens[0]
 
 
-def get_daily_capacity(metadata_path: str = "metadata.json") -> int:
+def _capacity_path(metadata_path: str = None) -> str:
+    """Resolve capacity state path.
+
+    Omitted/default runtime calls use state/global.json. Explicit paths keep the
+    legacy metadata.json shape for tests and migration tooling.
+    """
+    if metadata_path is None:
+        return _default_capacity_path()
+    return _resolve_path(metadata_path)
+
+
+def _load_capacity_state(path: str) -> Dict:
+    """Load capacity state, tolerating old metadata.json-shaped files."""
+    return _load_json_file(path, default={})
+
+
+def get_daily_capacity(metadata_path: str = None) -> int:
     """
     Get current daily capacity, resetting to 1000 if it's a new day (UTC).
     Returns current capacity.
     """
     with _token_lock:
-        metadata = load_metadata(metadata_path)
-        
+        capacity_path = _capacity_path(metadata_path)
+        metadata = _load_capacity_state(capacity_path)
+
         # Get current UTC date
         today_utc = datetime.now(timezone.utc).date().isoformat()
-        
+
         # Check if we have capacity tracking
         if "daily_capacity" not in metadata:
             metadata["daily_capacity"] = DAILY_CAPACITY
             metadata["last_capacity_date"] = today_utc
-            save_metadata(metadata, metadata_path)
+            _write_json_atomic(capacity_path, metadata)
             return DAILY_CAPACITY
-        
+
         last_date = metadata.get("last_capacity_date")
-        
+
         # If it's a new day, reset capacity
         if last_date != today_utc:
             metadata["daily_capacity"] = DAILY_CAPACITY
             metadata["last_capacity_date"] = today_utc
-            save_metadata(metadata, metadata_path)
+            _write_json_atomic(capacity_path, metadata)
             return DAILY_CAPACITY
-        
+
         # Return current capacity
         return metadata.get("daily_capacity", DAILY_CAPACITY)
 
 
-def decrement_daily_capacity(metadata_path: str = "metadata.json") -> bool:
+def decrement_daily_capacity(metadata_path: str = None) -> bool:
     """
     Decrement daily capacity by 1 (called for each LM API call).
     Returns True if capacity still available, False if exhausted.
     Automatically resets to 1000 if it's a new day (UTC).
     """
     with _token_lock:
-        metadata = load_metadata(metadata_path)
-        
+        capacity_path = _capacity_path(metadata_path)
+        metadata = _load_capacity_state(capacity_path)
+
         # Get current UTC date
         today_utc = datetime.now(timezone.utc).date().isoformat()
-        
+
         # Initialize if not exists
         if "daily_capacity" not in metadata:
             metadata["daily_capacity"] = DAILY_CAPACITY
             metadata["last_capacity_date"] = today_utc
-        
+
         last_date = metadata.get("last_capacity_date")
-        
+
         # If it's a new day, reset capacity
         if last_date != today_utc:
             metadata["daily_capacity"] = DAILY_CAPACITY
             metadata["last_capacity_date"] = today_utc
-        
+
         # Get current capacity
         capacity = metadata.get("daily_capacity", DAILY_CAPACITY)
-        
+
         if capacity <= 0:
             return False
 
@@ -421,12 +497,12 @@ def decrement_daily_capacity(metadata_path: str = "metadata.json") -> bool:
         metadata["daily_capacity"] = capacity
 
         # Update metadata
-        save_metadata(metadata, metadata_path)
+        _write_json_atomic(capacity_path, metadata)
 
         return capacity >= 0
 
 
-def check_capacity_at_start(metadata_path: str = "metadata.json") -> Tuple[int, bool]:
+def check_capacity_at_start(metadata_path: str = None) -> Tuple[int, bool]:
     """
     Check capacity at the start of processing (when link/video is sent).
     Returns (current_capacity, should_warn) tuple.
@@ -443,13 +519,13 @@ def get_token_count(api_key_path: str = "api_key.txt") -> int:
     return len(tokens)
 
 
-def check_token_warning(metadata_path: str = "metadata.json") -> bool:
+def check_token_warning(metadata_path: str = None) -> bool:
     """Check if daily capacity is less than warning threshold (50)"""
     capacity = get_daily_capacity(metadata_path)
     return capacity < WARNING_THRESHOLD
 
 
-def load_user_settings(settings_path: str = "user_settings.json") -> Dict:
+def load_user_settings(settings_path: str = _DEFAULT_USER_SETTINGS_PATH) -> Dict:
     """
     Load user settings from JSON file.
     Creates file with empty dict if it doesn't exist.
@@ -462,7 +538,7 @@ def load_user_settings(settings_path: str = "user_settings.json") -> Dict:
         logger.info(f"User settings file not found, creating: {settings_path}")
         save_user_settings({}, settings_path)
         return {}
-    
+
     try:
         with open(settings_path, 'r', encoding='utf-8') as f:
             settings = json.load(f)
@@ -488,38 +564,47 @@ def save_user_settings(settings: Dict, settings_path: str = "user_settings.json"
     """
     settings_path = _resolve_path(settings_path)
     try:
-        # Convert int keys to string for JSON serialization
         settings_for_json = {str(k): v for k, v in settings.items()}
-
-        with open(settings_path, 'w', encoding='utf-8') as f:
-            json.dump(settings_for_json, f, indent=2, ensure_ascii=False)
+        _write_json_atomic(settings_path, settings_for_json)
     except Exception as e:
         logger.error(f"Error saving user settings: {e}")
         raise
 
 
-def get_user_setting(user_id: int, setting_key: str, default=None, settings_path: str = "user_settings.json"):
+def _use_per_user_settings(settings_path: str = None) -> bool:
+    """Return True when callers should use state/users/<id>.json."""
+    return settings_path is None or settings_path == _DEFAULT_USER_SETTINGS_PATH
+
+
+def get_user_setting(user_id: int, setting_key: str, default=None, settings_path: str = None):
     """
     Get a specific setting for a user.
-    
+
     Args:
         user_id: Telegram user ID
         setting_key: Setting key to retrieve
         default: Default value if setting not found
         settings_path: Path to settings file
-    
+
     Returns:
         Setting value or default
     """
+    if _use_per_user_settings(settings_path):
+        state = _load_user_state(user_id)
+        settings = state.get("settings", {})
+        if not isinstance(settings, dict):
+            return default
+        return settings.get(setting_key, default)
+
     settings = load_user_settings(settings_path)
-    
+
     if user_id not in settings:
         return default
-    
+
     return settings[user_id].get(setting_key, default)
 
 
-def set_user_setting(user_id: int, setting_key: str, value, settings_path: str = "user_settings.json"):
+def set_user_setting(user_id: int, setting_key: str, value, settings_path: str = None):
     """
     Set a specific setting for a user.
     Uses a lock to prevent concurrent read-modify-write races.
@@ -531,6 +616,16 @@ def set_user_setting(user_id: int, setting_key: str, value, settings_path: str =
         settings_path: Path to settings file
     """
     with _settings_lock:
+        if _use_per_user_settings(settings_path):
+            state = _load_user_state(user_id)
+            settings = state.get("settings", {})
+            if not isinstance(settings, dict):
+                settings = {}
+            settings[setting_key] = value
+            state["settings"] = settings
+            _save_user_state(user_id, state)
+            return
+
         settings = load_user_settings(settings_path)
 
         if user_id not in settings:
@@ -540,7 +635,7 @@ def set_user_setting(user_id: int, setting_key: str, value, settings_path: str =
         save_user_settings(settings, settings_path)
 
 
-def initialize_user_settings(user_id: int, settings_path: str = "user_settings.json"):
+def initialize_user_settings(user_id: int, settings_path: str = None):
     """
     Initialize default settings for a new user.
     Default: show_original_translation=True, show_transcription=True
@@ -550,13 +645,30 @@ def initialize_user_settings(user_id: int, settings_path: str = "user_settings.j
         settings_path: Path to settings file
     """
     with _settings_lock:
+        defaults = {
+            "show_original_translation": True,
+            "show_transcription": True,
+        }
+
+        if _use_per_user_settings(settings_path):
+            state = _load_user_state(user_id)
+            settings = state.get("settings", {})
+            if not isinstance(settings, dict):
+                settings = {}
+            changed = False
+            for key, value in defaults.items():
+                if key not in settings:
+                    settings[key] = value
+                    changed = True
+            if changed:
+                state["settings"] = settings
+                _save_user_state(user_id, state)
+            logger.info(f"Initialized default settings for user {user_id}")
+            return
+
         settings = load_user_settings(settings_path)
 
         if user_id not in settings:
-            settings[user_id] = {
-                "show_original_translation": True,
-                "show_transcription": True
-            }
+            settings[user_id] = defaults
             save_user_settings(settings, settings_path)
         logger.info(f"Initialized default settings for user {user_id}")
-

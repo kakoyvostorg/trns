@@ -3,6 +3,7 @@ Shared fixtures for the TRNS test suite.
 """
 
 import json
+
 import pytest
 
 

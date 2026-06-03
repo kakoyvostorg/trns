@@ -43,6 +43,10 @@ export BOT_TOKEN=...            # from @BotFather
 export TELEGRAM_API_ID=...      # from my.telegram.org
 export TELEGRAM_API_HASH=...    # from my.telegram.org
 export AUTH_KEY=secret123       # users authenticate with this once
+# For internet-facing production also set:
+# export TRNS_ENV=production
+# export WEBHOOK_SECRET=...
+# export ADMIN_TOKEN=...
 
 python -m trns.bot.server
 ```
@@ -79,7 +83,7 @@ Every key in `config.json` maps to a CLI flag. Here's what each one does:
 | `lm_model` | `--lm-model` | string | `"google/gemma-3-27b-it:free"` | OpenRouter model identifier. See [openrouter.ai/models](https://openrouter.ai/models) for options. Free models have `:free` suffix. |
 | `debug` | `--debug` | boolean | `false` | **false** (production): logs go to `logs.txt`, stdout shows only transcription/LLM output. **true**: verbose logs go to stderr, useful for troubleshooting. |
 | `context` | `--context` | string | `""` | Additional context passed to the LLM (e.g. "This is a Sberbank earnings call"). Helps the model produce better summaries. |
-| `allowed_user_ids` | — | array of integers | `[]` | Telegram user IDs allowed to use the bot. Users can also authenticate at runtime via `AUTH_KEY`. |
+| `allowed_user_ids` | — | array of integers | `[]` | Optional legacy/preauthorized Telegram user IDs. New runtime authentications are stored in per-user files under `TRNS_STATE_DIR`. |
 
 ### Example config.json
 
@@ -123,6 +127,10 @@ These are primarily for the Telegram bot server, not the CLI:
 | `CONFIG_PATH` | Path to `config.json` | `config.json` |
 | `METADATA_PATH` | Path to `metadata.json` | `metadata.json` |
 | `TRNS_HOME` | Base directory for resolving all relative paths | CWD |
+| `TRNS_STATE_DIR` | Runtime state directory for per-user state and daily capacity | `state` under `TRNS_HOME` |
+| `TRNS_ENV` | Set to `production` to require webhook/admin secrets at startup | `development` |
+| `WEBHOOK_SECRET` | Telegram webhook secret token; required when `TRNS_ENV=production` | — |
+| `ADMIN_TOKEN` | Bearer token for `/set_webhook` and `/webhook_info`; required when `TRNS_ENV=production` | — |
 
 ### File Layout
 
@@ -137,7 +145,11 @@ your-project/
 ├── prompt_original.md   # LLM prompt template (original language output)
 ├── bot_key.txt          # Telegram bot token (alternative to env var)
 ├── key.txt              # Auth key (alternative to env var)
-└── logs.txt             # Production logs (auto-created)
+├── logs.txt             # Production logs (auto-created)
+└── state/               # Runtime state (ignored by git)
+    ├── global.json      # Daily LM capacity counter
+    └── users/
+        └── <telegram_id>.json  # Per-user auth/settings/context
 ```
 
 ---

@@ -14,11 +14,13 @@ services:
       - TELEGRAM_API_HASH=${TELEGRAM_API_HASH}
       - AUTH_KEY=${AUTH_KEY}
       - OPENROUTER_API_KEY=${OPENROUTER_API_KEY}
+      - TRNS_ENV=${TRNS_ENV:-development}
       - WEBHOOK_SECRET=${WEBHOOK_SECRET:-}
       - ADMIN_TOKEN=${ADMIN_TOKEN:-}
       # TRNS_HOME tells the app where to find config.json, metadata.json, etc.
       # Must match the container-side mount path below.
       - TRNS_HOME=/app/config
+      - TRNS_STATE_DIR=/app/config/state
       - HOST=0.0.0.0
       - PORT=8000
     volumes:
@@ -32,4 +34,3 @@ services:
       timeout: 10s
       retries: 3
       start_period: 5s
-

@@ -9,22 +9,23 @@ import threading
 from pyrogram import Client
 from pyrogram.types import Message
 
+from trns.bot.output_handler import send_text_to_telegram
 from trns.bot.utils import (
-    load_metadata,
+    get_context,
     get_text,
     get_user_setting,
+    load_metadata,
     reset_context,
-    get_context,
 )
+from trns.transcription.main import apply_config_to_args, create_default_config
+from trns.transcription.main import load_config as load_config_main
 from trns.transcription.pipeline import TranscriptionPipeline, extract_video_id
-from trns.transcription.main import apply_config_to_args, create_default_config, load_config as load_config_main
-from trns.bot.output_handler import send_text_to_telegram
 
 from ._state import (
+    _remove_task_if_owner,
     _resolve_args_paths,
     processing_lock,
     user_processing_tasks,
-    _remove_task_if_owner,
 )
 
 logger = logging.getLogger(__name__)
