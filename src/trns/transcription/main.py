@@ -9,12 +9,12 @@ This script extracts text from a YouTube live stream in real time using:
 
 Usage:
     trns <youtube_url> [--method METHOD] [--interval SECONDS]
-    
+
     Methods:
         - auto (default): Try subtitles first, fallback to Whisper
         - subtitles: Only use subtitles
         - whisper: Only use Whisper
-    
+
     Example:
         trns "https://www.youtube.com/watch?v=VIDEO_ID" --interval 30
 
@@ -23,11 +23,11 @@ Dependencies:
 """
 
 import argparse
-import sys
-import signal
-import logging
 import json
+import logging
 import os
+import signal
+import sys
 from typing import Optional
 
 from .pipeline import TranscriptionPipeline, extract_video_id
@@ -108,10 +108,10 @@ def create_default_config(config_path=None):
         "debug": False,
         "context": ""
     }
-    
+
     with open(config_path, 'w', encoding='utf-8') as f:
         json.dump(default_config, f, indent=2, ensure_ascii=False)
-    
+
     return default_config
 
 
@@ -130,7 +130,7 @@ def load_config(config_path=None):
     config_path = _resolve_trns_path(config_path)
     if not os.path.exists(config_path):
         return None
-    
+
     try:
         with open(config_path, 'r', encoding='utf-8') as f:
             config = json.load(f)
@@ -214,11 +214,11 @@ def apply_config_to_args(args, config, explicit_cli_keys=None):
 def main():
     """Main function to run the transcription script"""
     global shutdown_flag
-    
+
     # Register signal handlers (only when running as main script, not when imported)
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
-    
+
     parser = argparse.ArgumentParser(
         description="Extract text from YouTube live stream in real time",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -226,21 +226,21 @@ def main():
 Examples:
   # Auto-detect method (subtitles first, then Whisper)
   trns "https://www.youtube.com/watch?v=VIDEO_ID"
-  
+
   # Use only subtitles
   trns "https://www.youtube.com/watch?v=VIDEO_ID" --method subtitles
-  
+
   # Use only Whisper
   trns "https://www.youtube.com/watch?v=VIDEO_ID" --method whisper
-  
+
   # Custom interval
   trns "https://www.youtube.com/watch?v=VIDEO_ID" --interval 60
-  
+
   # With LM processing (default: both transcriptions and reports)
   trns "https://www.youtube.com/watch?v=VIDEO_ID" --lm-output-mode both
         """
     )
-    
+
     parser.add_argument(
         "url",
         nargs='?',  # Make URL optional (can come from config)
@@ -350,6 +350,47 @@ Examples:
         help="OpenRouter.ai model name for LM processing (default: google/gemma-3-27b-it:free)"
     )
     parser.add_argument(
+        "--timecode",
+        action="store_true",
+        default=False,
+        help=(
+            "Prefix each emitted transcription line with a [MM:SS] (or "
+            "[HH:MM:SS] on long videos) timecode. For live streams timecodes "
+            "are relative to the start of capture, not wall-clock time."
+        ),
+    )
+    parser.add_argument(
+        "--timecode-in-summary",
+        action="store_true",
+        default=False,
+        help=(
+            "Inject sparse [MM:SS] markers into the transcript window sent "
+            "to the LM and append a brief bilingual instruction telling the "
+            "model to cite them when referencing moments."
+        ),
+    )
+    parser.add_argument(
+        "--timecode-min-interval-seconds",
+        type=float,
+        default=30.0,
+        help=(
+            "Minimum spacing (in source-video seconds) between timecode "
+            "markers in the LM prompt. Lower = more markers, more tokens. "
+            "Only relevant with --timecode-in-summary. Default: 30."
+        ),
+    )
+    parser.add_argument(
+        "--video-metadata-chars",
+        type=int,
+        default=2000,
+        help=(
+            "Maximum number of characters of the video description to splice "
+            "into the LM prompt alongside the title (wrapped in a "
+            "<video_metadata> block). Set to 0 to disable metadata entirely. "
+            "Default: 2000."
+        ),
+    )
+    parser.add_argument(
         "--debug",
         action="store_true",
         default=False,
@@ -428,7 +469,7 @@ Examples:
             pass  # CLI URL wins
         elif config.get("url"):
             args.url = config["url"]
-    
+
     # Resolve TRNS_HOME: base directory for all relative resource paths
     trns_home = os.path.abspath(os.environ.get("TRNS_HOME", os.getcwd()))
     args.trns_home = trns_home
@@ -446,6 +487,10 @@ Examples:
     if args.save_transcript:
         args.save_transcript = _resolve(args.save_transcript)
     args.metadata_path = _resolve("metadata.json")
+    state_dir = os.environ.get("TRNS_STATE_DIR", "state")
+    if not os.path.isabs(state_dir):
+        state_dir = os.path.join(trns_home, state_dir)
+    args.capacity_path = os.path.join(state_dir, "global.json")
 
     # Configure logging based on debug mode
     import logging.handlers
@@ -489,7 +534,7 @@ Examples:
             root_logger.addHandler(handler)
             root_logger.setLevel(logging.INFO)
             logger.warning(f"Failed to create {logs_path}, falling back to stderr: {e}")
-    
+
     # Extract video ID (URL can come from CLI or config)
     if not args.url:
         logger.error("URL, video ID, or local file path is required. Provide it via --url argument or in config.json")
@@ -501,7 +546,7 @@ Examples:
     except Exception as e:
         logger.error(f"Invalid input (URL, video ID, or file path): {e}")
         sys.exit(1)
-    
+
     # Create and run pipeline
     try:
         pipeline = TranscriptionPipeline(
@@ -523,4 +568,3 @@ Examples:
 
 if __name__ == "__main__":
     main()
-

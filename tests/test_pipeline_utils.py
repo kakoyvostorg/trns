@@ -2,7 +2,6 @@
 Tests for extract_video_id — the pure URL-parsing helper used by the pipeline.
 """
 
-import pytest
 from trns.transcription.pipeline import extract_video_id
 
 

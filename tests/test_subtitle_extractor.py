@@ -4,11 +4,11 @@ Tests for YouTubeSubtitleExtractor.
 YouTube API calls are fully mocked — no network access.
 """
 
-import pytest
 from unittest.mock import MagicMock, patch
 
-from trns.transcription.subtitle_extractor import YouTubeSubtitleExtractor
+import pytest
 
+from trns.transcription.subtitle_extractor import YouTubeSubtitleExtractor
 
 # ---------------------------------------------------------------------------
 # extract_video_id (instance method — same logic as the pipeline helper)

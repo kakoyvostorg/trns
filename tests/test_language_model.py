@@ -6,8 +6,7 @@ fully offline.
 """
 
 import math
-import pytest
-from unittest.mock import MagicMock, patch, mock_open
+from unittest.mock import MagicMock, patch
 
 
 def make_lm_processor(**kwargs):

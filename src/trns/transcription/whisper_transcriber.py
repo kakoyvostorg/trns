@@ -6,10 +6,10 @@ Uses tiny model for English, small model for other languages.
 Extracts audio from YouTube video and processes it in chunks.
 """
 
-import os
-import time
-import re
 import logging
+import os
+import re
+import time
 from typing import Optional, Tuple
 
 logger = logging.getLogger(__name__)
@@ -28,7 +28,7 @@ class WhisperTranscriber:
     Uses tiny model for English, small model for other languages.
     Extracts audio from YouTube video and processes it in chunks.
     """
-    
+
     def __init__(self, model_size: str = "auto", use_faster_whisper: bool = True, shutdown_flag=None):
         """
         Initialize Whisper transcriber.
@@ -54,7 +54,7 @@ class WhisperTranscriber:
         self._translator_cache = {}  # {source_language: GoogleTranslator instance}
         self._last_detected_language = None  # Cache last detected language
         self._initialize_model()
-    
+
     def _check_shutdown(self) -> bool:
         """Check if shutdown was requested"""
         if self.shutdown_flag is None:
@@ -62,7 +62,7 @@ class WhisperTranscriber:
         if callable(self.shutdown_flag):
             return self.shutdown_flag()
         return bool(self.shutdown_flag)
-    
+
     @staticmethod
     def _cleanup_temp_files(base_path: str):
         """Remove any temp audio files matching the base path (all extensions)."""
@@ -91,8 +91,9 @@ class WhisperTranscriber:
         try:
             if self.use_faster_whisper:
                 try:
-                    from faster_whisper import WhisperModel
                     import os
+
+                    from faster_whisper import WhisperModel
                     cpu_threads = max(1, os.cpu_count() - 1) if os.cpu_count() else 4
                     logger.info(f"Initializing faster-whisper with {cpu_threads} CPU threads...")
 
@@ -149,13 +150,13 @@ class WhisperTranscriber:
                     logger.info("Tiny model loaded successfully")
                     logger.info("Small model will be loaded on-demand for non-English languages")
 
-        except ImportError as e:
-            logger.error(f"Whisper library not installed. Install with: pip install faster-whisper (or openai-whisper)")
+        except ImportError:
+            logger.error("Whisper library not installed. Install with: pip install faster-whisper (or openai-whisper)")
             raise
         except Exception as e:
             logger.error(f"Error initializing Whisper model: {e}")
             raise
-    
+
     def _get_transcription_model(self, language: str):
         """
         Get the appropriate model for transcription based on language.
@@ -181,8 +182,9 @@ class WhisperTranscriber:
         if self.small_model is None:
             logger.info("Loading small model for non-English transcription...")
             if self.use_faster_whisper:
-                from faster_whisper import WhisperModel
                 import os
+
+                from faster_whisper import WhisperModel
                 cpu_threads = max(1, os.cpu_count() - 1) if os.cpu_count() else 4
                 self.small_model = WhisperModel(
                     "small",
@@ -197,20 +199,20 @@ class WhisperTranscriber:
             logger.info("Small model loaded successfully")
 
         return self.small_model
-    
+
     def _get_video_info(self, video_id: str, force_refresh: bool = False) -> Optional[dict]:
         """
         Get video info, using cache if available and not expired.
-        
+
         Args:
             video_id: YouTube video ID or URL (for Twitter/X.com support)
             force_refresh: Force refresh even if cache is valid
-        
+
         Returns:
             Video info dict or None if failed
         """
         import yt_dlp
-        
+
         # Determine URL: local file, full URL, or YouTube video ID
         if _is_local_file(video_id):
             url = video_id
@@ -219,18 +221,18 @@ class WhisperTranscriber:
         else:
             url = f"https://www.youtube.com/watch?v={video_id}"
         current_time = time.time()
-        
+
         # Check cache
         if not force_refresh and video_id in self._video_info_cache:
             cached = self._video_info_cache[video_id]
             age = current_time - cached['timestamp']
-            
+
             if age < self._cache_ttl:
                 logger.debug(f"Using cached video info (age: {age:.1f}s)")
                 return cached['info']
             else:
                 logger.debug(f"Cache expired (age: {age:.1f}s), refreshing...")
-        
+
         # Fetch fresh info
         logger.info(f"Fetching video info for: {video_id}")
         ydl_opts_info = {
@@ -251,7 +253,7 @@ class WhisperTranscriber:
             with yt_dlp.YoutubeDL(ydl_opts_info) as ydl:
                 logger.info("Extracting video info...")
                 info = ydl.extract_info(url, download=False)
-                
+
                 if info:
                     # Cache the info
                     self._video_info_cache[video_id] = {
@@ -264,7 +266,7 @@ class WhisperTranscriber:
                 else:
                     logger.error("Failed to get video info")
                     return None
-                    
+
         except Exception as e:
             logger.error(f"Error getting video info: {e}")
             # If we have stale cache, try using it
@@ -272,24 +274,25 @@ class WhisperTranscriber:
                 logger.warning("Using stale cache due to error")
                 return self._video_info_cache[video_id]['info']
             return None
-    
+
     def extract_audio_chunk_from_video(self, video_id: str, start_time: float, duration: float, force_refresh_info: bool = False) -> Optional[str]:
         """
         Extract a specific audio chunk from a non-live video using yt-dlp and ffmpeg.
-        
+
         Args:
             video_id: YouTube video ID or URL (for Twitter/X.com support)
             start_time: Start time in seconds
             duration: Duration in seconds to extract
             force_refresh_info: Force refresh of cached video info
-        
+
         Returns:
             Path to extracted audio file, or None if extraction failed
         """
         try:
-            import yt_dlp
             import tempfile
-            
+
+            import yt_dlp
+
             # Determine URL: local file, full URL, or YouTube video ID
             if _is_local_file(video_id):
                 url = video_id
@@ -306,14 +309,14 @@ class WhisperTranscriber:
             # Create temporary file for audio
             temp_dir = tempfile.gettempdir()
             audio_path = os.path.join(temp_dir, audio_filename)
-            
+
             # Get video info (uses cache if available)
             info = self._get_video_info(video_id, force_refresh=force_refresh_info)
-            
+
             if not info:
                 logger.error("Failed to get video info")
                 return None
-            
+
             # Use yt-dlp with external downloader (ffmpeg) to extract specific time range
             # Note: When using external_downloader, yt-dlp might save the file with a different name
             # We'll search for the file after download
@@ -349,10 +352,10 @@ class WhisperTranscriber:
                     logger.debug("Shutdown requested before audio download")
                     self._cleanup_temp_files(base_audio_path)
                     return None
-                
+
                 logger.info(f"Downloading audio chunk from {start_time}s for {duration}s (video_id: {video_id})")
                 logger.debug(f"Base audio path: {base_audio_path}")
-                
+
                 # Download the audio chunk
                 with yt_dlp.YoutubeDL(ydl_opts_chunk) as ydl:
                     try:
@@ -366,18 +369,18 @@ class WhisperTranscriber:
                         if 'http' in error_str or 'network' in error_str or 'timeout' in error_str:
                             logger.warning("Network-related error, might be temporary")
                         return None
-                    
+
                     # Check shutdown flag after download
                     if self._check_shutdown():
                         logger.debug("Shutdown requested after audio download")
                         self._cleanup_temp_files(base_audio_path)
                         return None
-                    
+
                     # Find the actual audio file with retry logic
                     # yt-dlp might have saved it with a different name, so we search broadly
                     max_retries = 5
                     retry_delay = 0.2
-                    
+
                     logger.debug(f"Searching for audio file with base path: {base_audio_path}")
                     found_files = []
                     for retry in range(max_retries):
@@ -386,7 +389,7 @@ class WhisperTranscriber:
                             logger.debug("Shutdown requested during audio file search")
                             self._cleanup_temp_files(base_audio_path)
                             return None
-                        
+
                         # List all files in temp directory that match our pattern
                         temp_dir = os.path.dirname(base_audio_path)
                         base_name = os.path.basename(base_audio_path)
@@ -396,7 +399,7 @@ class WhisperTranscriber:
                             matching_files = [f for f in all_files if f.startswith(base_name)]
                             if matching_files:
                                 logger.debug(f"Found potential audio files matching base name: {matching_files}")
-                        
+
                         # Try the expected extensions first
                         for ext in ['.wav', '.m4a', '.webm', '.opus', '.mp3']:
                             candidate = base_audio_path + ext
@@ -412,7 +415,7 @@ class WhisperTranscriber:
                                     return candidate
                                 else:
                                     logger.warning(f"Found file but it's empty: {candidate}")
-                        
+
                         if retry < max_retries - 1:
                             logger.debug(f"Audio file not found yet, retry {retry + 1}/{max_retries}")
                             # Make sleep interruptible
@@ -423,7 +426,7 @@ class WhisperTranscriber:
                                 time.sleep(remaining)
                                 slept += remaining
                             retry_delay *= 1.5  # Exponential backoff
-                    
+
                     # Log detailed information about what we found
                     if found_files:
                         logger.warning(f"Audio file not found after download, but found these files: {found_files}")
@@ -435,7 +438,7 @@ class WhisperTranscriber:
                             recent_files = [f for f in os.listdir(temp_dir) if 'youtube_audio' in f]
                             if recent_files:
                                 logger.debug(f"Recent youtube_audio files in temp dir: {recent_files[-10:]}")
-                            
+
                             # Also check for files modified in the last minute (might be our download)
                             import time as time_module
                             current_time = time_module.time()
@@ -454,7 +457,7 @@ class WhisperTranscriber:
                 import traceback
                 logger.debug(f"Full traceback: {traceback.format_exc()}")
                 return None
-                
+
         except ImportError:
             logger.error("yt-dlp not installed. Install with: pip install yt-dlp")
             return None
@@ -463,26 +466,27 @@ class WhisperTranscriber:
             import traceback
             logger.debug(traceback.format_exc())
             return None
-    
+
     def extract_audio_from_youtube(self, video_id: str, duration: int = 30, overlap: int = 0, start_time: Optional[float] = None, force_refresh_info: bool = False) -> Optional[str]:
         """
         Extract audio from YouTube video using yt-dlp.
-        
+
         Args:
             video_id: YouTube video ID or URL (for Twitter/X.com support)
             duration: Duration in seconds to extract (for live streams, this is the chunk size)
             overlap: Overlap in seconds with previous chunk (default: 0)
             start_time: Start time in seconds (for non-live videos, if None, downloads entire video)
             force_refresh_info: Force refresh of cached video info
-        
+
         Returns:
             Path to extracted audio file, or None if extraction failed
         """
         try:
-            import yt_dlp
             import tempfile
             import threading
-            
+
+            import yt_dlp
+
             # Determine URL: local file, full URL, or YouTube video ID
             if _is_local_file(video_id):
                 url = video_id
@@ -499,18 +503,18 @@ class WhisperTranscriber:
             # Create temporary file for audio
             temp_dir = tempfile.gettempdir()
             audio_path = os.path.join(temp_dir, audio_filename)
-            
+
             # Get video info (uses cache if available)
             info = self._get_video_info(video_id, force_refresh=force_refresh_info)
-            
+
             if not info:
                 logger.error("Failed to get video info")
                 return None
-            
+
             # Check if it's a live stream
             is_live = info.get('is_live', False)
             logger.debug(f"Is live stream: {is_live}")
-            
+
             # For live streams, use yt-dlp with duration limit
             # This is more reliable than trying to use ffmpeg with stream URLs
             if is_live:
@@ -540,7 +544,7 @@ class WhisperTranscriber:
                         'Connection': 'keep-alive',
                     },
                 }
-                
+
                 try:
                     # Calculate timeout: use max of (download_duration * 2) or 45 seconds
                     # This ensures short intervals have enough time for connection overhead
@@ -550,7 +554,7 @@ class WhisperTranscriber:
                         # Set a timeout for the download
                         download_complete = threading.Event()
                         download_error = [None]
-                        
+
                         def download_thread():
                             try:
                                 ydl.download([url])
@@ -558,11 +562,11 @@ class WhisperTranscriber:
                             except Exception as e:
                                 download_error[0] = e
                                 download_complete.set()
-                        
+
                         thread = threading.Thread(target=download_thread)
                         thread.daemon = True
                         thread.start()
-                        
+
                         # Wait with timeout (adaptive based on duration)
                         if download_complete.wait(timeout=timeout_seconds):
                             if download_error[0]:
@@ -577,7 +581,7 @@ class WhisperTranscriber:
                             logger.warning(f"Download timeout after {timeout_seconds}s")
                             self._cleanup_temp_files(audio_path.replace('.wav', ''))
                             return None
-                        
+
                         # Find the actual audio file
                         logger.debug("Searching for downloaded audio file...")
                         base_path = audio_path.replace('.wav', '')
@@ -586,10 +590,10 @@ class WhisperTranscriber:
                             if os.path.exists(candidate):
                                 logger.debug(f"Found audio file: {candidate}")
                                 return candidate
-                        
+
                         logger.warning("Audio file not found after download")
                         return None
-                        
+
                 except Exception as e:
                     logger.error(f"Error downloading live stream chunk: {e}")
                     # Invalidate cache on persistent errors
@@ -602,7 +606,7 @@ class WhisperTranscriber:
                 if start_time is not None:
                     logger.debug(f"Extracting chunk from {start_time}s for {duration}s")
                     return self.extract_audio_chunk_from_video(video_id, start_time, duration, force_refresh_info)
-                
+
                 # Otherwise, download entire video (for full processing mode)
                 logger.info("Non-live video, downloading entire audio...")
                 ydl_opts_download = {
@@ -624,12 +628,12 @@ class WhisperTranscriber:
                         'Connection': 'keep-alive',
                     },
                 }
-                
+
                 try:
                     with yt_dlp.YoutubeDL(ydl_opts_download) as ydl:
                         logger.info("Downloading audio...")
                         ydl.download([url])
-                        
+
                         # Find the actual audio file (yt-dlp may change extension)
                         logger.info("Searching for downloaded audio file...")
                         base_path = audio_path.replace('.wav', '')
@@ -638,13 +642,13 @@ class WhisperTranscriber:
                             if os.path.exists(candidate):
                                 logger.info(f"Found audio file: {candidate}")
                                 return candidate
-                        
+
                         logger.warning("Audio file not found after download")
                         return None
                 except Exception as e:
                     logger.error(f"Error downloading audio: {e}")
                     return None
-            
+
         except ImportError:
             logger.error("yt-dlp not installed. Install with: pip install yt-dlp")
             return None
@@ -653,21 +657,21 @@ class WhisperTranscriber:
             import traceback
             logger.debug(traceback.format_exc())
             return None
-    
+
     def _detect_language(self, audio_path: str) -> Tuple[str, float]:
         """
         Quickly detect the language of audio using tiny Whisper model.
-        
+
         Args:
             audio_path: Path to audio file
-        
+
         Returns:
             Tuple of (detected_language, language_probability)
         """
         try:
             if self.language_detector is None:
                 return ("unknown", 0.0)
-            
+
             if self.use_faster_whisper:
                 _, info = self.language_detector.transcribe(audio_path, beam_size=1, vad_filter=True)
                 detected_language = info.language if hasattr(info, 'language') else "unknown"
@@ -676,51 +680,63 @@ class WhisperTranscriber:
                 result = self.language_detector.transcribe(audio_path)
                 detected_language = result.get("language", "unknown")
                 language_probability = 1.0
-            
+
             return (detected_language, language_probability)
         except Exception as e:
             logger.debug(f"Error detecting language: {e}")
             return ("unknown", 0.0)
-    
-    def transcribe_audio(self, audio_path: str) -> Tuple[str, str, float]:
+
+    def transcribe_audio(self, audio_path: str) -> Tuple[str, str, float, list]:
         """
         Transcribe audio file using Whisper.
         Uses tiny model for English, small model for other languages.
-        
+
         Args:
             audio_path: Path to audio file
-        
+
         Returns:
-            Tuple of (transcribed_text, detected_language, language_probability)
+            Tuple of (transcribed_text, detected_language, language_probability, segments).
+            `segments` is a list of dicts {'start': float, 'end': float, 'text': str}
+            with times relative to the start of `audio_path` (chunk-relative when the
+            caller passes a chunk; pipeline code is responsible for offsetting to
+            video-absolute time). May be an empty list when segment-level timing is
+            unavailable (e.g. openai-whisper's base `transcribe` without
+            `word_timestamps`, or on shutdown before any segment arrives).
         """
         if not os.path.exists(audio_path):
             logger.error(f"Audio file not found: {audio_path}")
-            return ("", "unknown", 0.0)
-        
+            return ("", "unknown", 0.0, [])
+
         try:
             # First, quickly detect language using tiny model
             detected_language, lang_prob = self._detect_language(audio_path)
             logger.debug(f"Detected language: {detected_language} (probability: {lang_prob:.2f})")
-            
+
             # Get appropriate model based on language
             model = self._get_transcription_model(detected_language)
             model_size = "tiny" if detected_language == "en" else "small"
             logger.info(f"Using {model_size} model for {detected_language} transcription")
-            
+
             # Transcribe with appropriate model
             if self.use_faster_whisper:
                 # Use faster-whisper
                 segments, info = model.transcribe(audio_path, beam_size=5)
-                
-                # Collect all text segments
+
+                # Collect all text segments plus structured timing
                 text_parts = []
+                segment_records = []
                 for segment in segments:
                     # Check shutdown flag during transcription
                     if self._check_shutdown():
                         logger.debug("Shutdown requested during transcription, stopping...")
                         break
                     text_parts.append(segment.text)
-                
+                    segment_records.append({
+                        'start': float(getattr(segment, 'start', 0.0) or 0.0),
+                        'end': float(getattr(segment, 'end', 0.0) or 0.0),
+                        'text': segment.text,
+                    })
+
                 text = " ".join(text_parts).strip()
                 # Use detected language from language detector if available, otherwise from transcription
                 if detected_language != "unknown":
@@ -729,12 +745,25 @@ class WhisperTranscriber:
                 else:
                     final_language = info.language if hasattr(info, 'language') else "unknown"
                     final_prob = info.language_probability if hasattr(info, 'language_probability') else 0.0
-                
-                return (text, final_language, final_prob)
+
+                return (text, final_language, final_prob, segment_records)
             else:
                 # Use openai-whisper
                 result = model.transcribe(audio_path)
                 text = result["text"].strip()
+
+                # openai-whisper returns segment-level timing in result["segments"]
+                segment_records = []
+                for seg in result.get("segments", []) or []:
+                    seg_text = seg.get("text", "")
+                    if seg_text is None:
+                        continue
+                    segment_records.append({
+                        'start': float(seg.get('start', 0.0) or 0.0),
+                        'end': float(seg.get('end', 0.0) or 0.0),
+                        'text': seg_text,
+                    })
+
                 # Use detected language from language detector if available, otherwise from transcription
                 if detected_language != "unknown":
                     final_language = detected_language
@@ -742,12 +771,12 @@ class WhisperTranscriber:
                 else:
                     final_language = result.get("language", "unknown")
                     final_prob = 1.0
-                
-                return (text, final_language, final_prob)
-                
+
+                return (text, final_language, final_prob, segment_records)
+
         except Exception as e:
             logger.error(f"Error transcribing audio: {e}")
-            return ("", "unknown", 0.0)
+            return ("", "unknown", 0.0, [])
         finally:
             # Clean up audio file
             try:
@@ -755,52 +784,52 @@ class WhisperTranscriber:
                     os.remove(audio_path)
             except OSError as e:
                 logger.debug("Could not remove temp audio file %s: %s", audio_path, e)
-    
+
     def translate_to_russian(self, text: str, source_language: str) -> str:
         """
         Translate text to Russian if source language is not Russian.
         Translates in chunks to avoid API limits.
-        
+
         Args:
             text: Text to translate
             source_language: Source language code (e.g., 'en', 'ru', 'es')
-        
+
         Returns:
             Translated text (or original if already Russian or translation fails)
         """
         if not text.strip():
             return text
-        
+
         # If already Russian, return as-is
         if source_language == 'ru':
             self._last_detected_language = 'ru'
             return text
-        
+
         try:
             from deep_translator import GoogleTranslator
-            
+
             # Cache translator instance by source language
             if source_language not in self._translator_cache:
                 logger.debug(f"Creating translator for {source_language} -> ru")
                 self._translator_cache[source_language] = GoogleTranslator(source=source_language, target='ru')
-            
+
             translator = self._translator_cache[source_language]
             self._last_detected_language = source_language
-            
+
             # Split text into chunks (max ~5000 characters per chunk to avoid API limits)
             max_chunk_size = 4500  # Conservative limit
             text_chunks = []
-            
+
             if len(text) <= max_chunk_size:
                 text_chunks = [text]
             else:
                 # Split by sentences first, then by chunks
                 sentences = re.split(r'([.!?]\s+)', text)
                 current_chunk = ""
-                
+
                 for i in range(0, len(sentences), 2):
                     sentence = sentences[i] + (sentences[i+1] if i+1 < len(sentences) else "")
-                    
+
                     if len(current_chunk) + len(sentence) <= max_chunk_size:
                         current_chunk += sentence
                     else:
@@ -821,10 +850,10 @@ class WhisperTranscriber:
                                 current_chunk = temp_chunk
                         else:
                             current_chunk = sentence
-                
+
                 if current_chunk:
                     text_chunks.append(current_chunk)
-            
+
             # Translate each chunk
             translated_chunks = []
             for i, chunk in enumerate(text_chunks):
@@ -839,20 +868,158 @@ class WhisperTranscriber:
                 except Exception as e:
                     logger.warning(f"Translation failed for chunk {i+1}: {e}, using original")
                     translated_chunks.append(chunk)
-            
+
             translated = " ".join(translated_chunks)
-            
+
             if translated:
                 logger.debug(f"Translation successful ({len(text_chunks)} chunks)")
                 return translated
             else:
                 logger.warning("Translation returned empty, using original text")
                 return text
-                
+
         except ImportError:
             logger.error("deep-translator not installed. Install with: pip install deep-translator")
             return text
         except Exception as e:
             logger.warning(f"Translation failed: {e}, using original text")
             return text
+
+    def translate_segments_to_russian(
+        self,
+        segments: list,
+        source_language: str,
+        batch_size: int = 10,
+    ) -> Tuple[str, list]:
+        """
+        Translate a list of whisper segments to Russian while preserving
+        per-segment alignment. Used by the pipeline to build anchors for
+        translated text: the returned `translated_segments` carry the same
+        `start`/`end` times as the originals, with `text` replaced by the
+        Russian translation.
+
+        Batching strategy: segments are joined with "\\n|||\\n" and sent in
+        groups of `batch_size` to Google Translate. After translation the
+        response is split on `|||`. If the split count does not match the
+        batch size (separator lost, Google translated it, etc.) we fall back
+        to per-segment translation for that batch. Worst case: one call per
+        segment; typical case: one call per 10 segments.
+
+        Args:
+            segments: list of {'start', 'end', 'text'} dicts (chunk-relative times).
+            source_language: source language code (e.g. 'en'). 'ru' -> no-op.
+            batch_size: number of segments joined per Google call.
+
+        Returns:
+            (joined_russian_text, translated_segments).
+            `joined_russian_text` = ' '.join(s['text'] for s in translated_segments).strip()
+            — same shape as the existing translate_to_russian result.
+            `translated_segments` is a list with the same length as input
+            (or possibly shorter if empty segments were filtered), each carrying
+            the same start/end plus Russian 'text'.
+        """
+        if not segments:
+            return '', []
+
+        # Trivial no-op for already-Russian content.
+        if source_language == 'ru':
+            self._last_detected_language = 'ru'
+            # Return deep copies so callers can mutate without surprising us.
+            passthrough = [dict(s) for s in segments]
+            joined = " ".join(s.get('text', '') for s in passthrough).strip()
+            return joined, passthrough
+
+        try:
+            from deep_translator import GoogleTranslator
+
+            if source_language not in self._translator_cache:
+                logger.debug(f"Creating translator for {source_language} -> ru")
+                self._translator_cache[source_language] = GoogleTranslator(source=source_language, target='ru')
+            translator = self._translator_cache[source_language]
+            self._last_detected_language = source_language
+
+            # Defensive: neutralize any literal '|||' that might appear in source
+            # text so our batch separator stays unique. Practically unheard-of
+            # in natural speech, but free insurance.
+            def _sanitize(t: str) -> str:
+                return (t or '').replace('|||', '| | |')
+
+            translated_segments: list = []
+
+            # Split input into batches
+            for start in range(0, len(segments), batch_size):
+                batch = segments[start:start + batch_size]
+                batch_texts = [_sanitize(s.get('text', '')) for s in batch]
+
+                # If the whole batch is empty, just carry originals through
+                if not any(t.strip() for t in batch_texts):
+                    translated_segments.extend(dict(s) for s in batch)
+                    continue
+
+                joined_input = "\n|||\n".join(batch_texts)
+
+                def _per_segment_fallback(batch_slice):
+                    """Translate each segment individually; on failure keep original."""
+                    out = []
+                    for orig in batch_slice:
+                        src = _sanitize(orig.get('text', ''))
+                        if not src.strip():
+                            out.append(dict(orig))
+                            continue
+                        try:
+                            single = translator.translate(src)
+                            if single:
+                                out.append({**orig, 'text': single.strip()})
+                            else:
+                                out.append(dict(orig))
+                        except Exception as inner_e:
+                            logger.warning(
+                                f"Per-segment translation failed (start={orig.get('start')}): {inner_e}"
+                            )
+                            out.append(dict(orig))
+                    return out
+
+                try:
+                    response = translator.translate(joined_input) or ""
+                except Exception as e:
+                    logger.warning(f"Batch translate raised {e!r}; falling back per-segment")
+                    translated_segments.extend(_per_segment_fallback(batch))
+                    continue
+
+                # Split on '|||' (ignoring surrounding whitespace/newlines — Google
+                # may reformat them).
+                pieces = [p.strip() for p in response.split('|||')]
+
+                if len(pieces) != len(batch):
+                    logger.warning(
+                        f"Batch separator lost ({len(pieces)} pieces vs {len(batch)} "
+                        f"segments); falling back per-segment"
+                    )
+                    translated_segments.extend(_per_segment_fallback(batch))
+                    continue
+
+                for orig, translated_piece in zip(batch, pieces):
+                    if translated_piece:
+                        translated_segments.append({**orig, 'text': translated_piece})
+                    else:
+                        # Empty Russian for this slot — keep original text as fallback.
+                        translated_segments.append(dict(orig))
+
+            joined = " ".join(s.get('text', '') for s in translated_segments).strip()
+            logger.debug(
+                f"Segment translation complete: {len(segments)} segments -> "
+                f"{len(translated_segments)} translated ({len(joined)} chars)"
+            )
+            return joined, translated_segments
+
+        except ImportError:
+            logger.error("deep-translator not installed. Install with: pip install deep-translator")
+            passthrough = [dict(s) for s in segments]
+            joined = " ".join(s.get('text', '') for s in passthrough).strip()
+            return joined, passthrough
+        except Exception as e:
+            logger.warning(f"Segment translation setup failed: {e}; returning original text")
+            passthrough = [dict(s) for s in segments]
+            joined = " ".join(s.get('text', '') for s in passthrough).strip()
+            return joined, passthrough
 

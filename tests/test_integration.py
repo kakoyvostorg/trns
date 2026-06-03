@@ -10,6 +10,7 @@ the full download → transcribe pipeline works end-to-end.
 """
 
 import os
+
 import pytest
 
 # Video used for all integration tests: short Russian-language clip (~132s)
@@ -80,12 +81,16 @@ def test_transcribe_detects_russian():
 
     assert audio_path is not None, "Audio download failed — cannot transcribe"
 
-    text, language, prob = transcriber.transcribe_audio(audio_path)
+    text, language, prob, segments = transcriber.transcribe_audio(audio_path)
     # transcribe_audio removes the file itself
 
     assert language == "ru", f"Expected 'ru', got '{language}'"
     assert prob > 0.5, f"Language probability too low: {prob}"
     assert len(text) > 20, f"Transcription too short: {text!r}"
+    # faster-whisper should produce at least one timed segment
+    assert isinstance(segments, list)
+    assert len(segments) > 0, "Expected at least one segment from faster-whisper"
+    assert all({'start', 'end', 'text'} <= set(s.keys()) for s in segments)
 
 
 @pytest.mark.integration
@@ -96,7 +101,7 @@ def test_transcription_contains_russian_characters():
 
     assert audio_path is not None, "Audio download failed"
 
-    text, _, _ = transcriber.transcribe_audio(audio_path)
+    text, _, _, _ = transcriber.transcribe_audio(audio_path)
 
     cyrillic = sum(1 for ch in text if "\u0400" <= ch <= "\u04FF")
     assert cyrillic > 10, f"Expected Cyrillic characters in output, got: {text!r}"
