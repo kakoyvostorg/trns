@@ -34,6 +34,9 @@ _DEFAULT_CONFIG = {
     "lm_prompt_file": "prompt.md",
     "lm_prompt_original_file": "prompt_original.md",
     "lm_model": "google/gemma-3-27b-it:free",
+    "timecode": False,
+    "timecode_in_summary": False,
+    "timecode_min_interval_seconds": 30.0,
     "debug": False,
     "context": "",
 }

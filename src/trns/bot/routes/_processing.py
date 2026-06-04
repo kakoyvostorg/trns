@@ -13,6 +13,7 @@ from trns.bot.output_handler import send_text_to_telegram
 from trns.bot.utils import (
     get_context,
     get_text,
+    get_timecode_default,
     get_user_setting,
     load_metadata,
     reset_context,
@@ -238,6 +239,11 @@ async def _process_url_video(url: str, video_id: str, user_id: int, client: Clie
         # Load user settings (fixes bug where YouTube path was missing this)
         show_original = get_user_setting(user_id, "show_original_translation", default=True)
         show_transcription = get_user_setting(user_id, "show_transcription", default=True)
+        timecode_enabled = get_user_setting(
+            user_id,
+            "timecode_enabled",
+            default=get_timecode_default(config),
+        )
 
         class Args:
             pass
@@ -249,6 +255,8 @@ async def _process_url_video(url: str, video_id: str, user_id: int, client: Clie
         args.context = get_context(user_id)
         args.show_original_translation = show_original
         args.show_transcription = show_transcription
+        args.timecode = timecode_enabled
+        args.timecode_in_summary = timecode_enabled
 
         if client is None:
             logger.error(f"Client instance is None for user_id={user_id}, chat_id={chat_id}")
@@ -338,6 +346,11 @@ async def process_video_file(video_path: str, user_id: int, client: Client, mess
 
         show_original = get_user_setting(user_id, "show_original_translation", default=True)
         show_transcription = get_user_setting(user_id, "show_transcription", default=True)
+        timecode_enabled = get_user_setting(
+            user_id,
+            "timecode_enabled",
+            default=get_timecode_default(config),
+        )
 
         class Args:
             pass
@@ -351,6 +364,8 @@ async def process_video_file(video_path: str, user_id: int, client: Client, mess
         args.context = get_context(user_id)
         args.show_original_translation = show_original
         args.show_transcription = show_transcription
+        args.timecode = timecode_enabled
+        args.timecode_in_summary = timecode_enabled
 
         if client is None:
             logger.error(f"Client instance is None for user_id={user_id}, chat_id={chat_id}")

@@ -14,6 +14,7 @@ from trns.bot.utils import (
     check_capacity_at_start,
     check_token_warning,
     get_text,
+    get_timecode_default,
     get_user_setting,
     initialize_user_settings,
     is_user_authenticated,
@@ -93,6 +94,8 @@ async def handle_text_message(client: Client, message: Message) -> None:
     hide_original_btn = get_text(metadata, "hide_original_translation_button")
     show_transcription_btn = get_text(metadata, "show_transcription_button")
     hide_transcription_btn = get_text(metadata, "hide_transcription_button")
+    show_timecodes_btn = get_text(metadata, "show_timecodes_button")
+    hide_timecodes_btn = get_text(metadata, "hide_timecodes_button")
 
     # Handle button clicks
     if text == context_btn_text:
@@ -106,6 +109,9 @@ async def handle_text_message(client: Client, message: Message) -> None:
         return
     elif text == show_transcription_btn or text == hide_transcription_btn:
         await handle_toggle_transcription_button(client, message)
+        return
+    elif text == show_timecodes_btn or text == hide_timecodes_btn:
+        await handle_toggle_timecodes_button(client, message)
         return
 
     # Handle state-based inputs
@@ -397,6 +403,30 @@ async def handle_toggle_transcription_button(client: Client, message: Message) -
         confirmation = get_text(metadata, "transcription_enabled")
     else:
         confirmation = get_text(metadata, "transcription_disabled")
+
+    keyboard = create_keyboard(metadata, user_id)
+    await message.reply_text(confirmation, reply_markup=keyboard)
+
+
+async def handle_toggle_timecodes_button(client: Client, message: Message) -> None:
+    """Handle toggle timecodes button click"""
+    from trns.bot.server import bot_metadata, create_keyboard
+
+    user_id = message.from_user.id
+    metadata = bot_metadata if bot_metadata else load_metadata()
+
+    current_setting = get_user_setting(
+        user_id,
+        "timecode_enabled",
+        default=get_timecode_default(),
+    )
+    new_setting = not current_setting
+    set_user_setting(user_id, "timecode_enabled", new_setting)
+
+    if new_setting:
+        confirmation = get_text(metadata, "timecodes_enabled")
+    else:
+        confirmation = get_text(metadata, "timecodes_disabled")
 
     keyboard = create_keyboard(metadata, user_id)
     await message.reply_text(confirmation, reply_markup=keyboard)

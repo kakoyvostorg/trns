@@ -22,6 +22,7 @@ from trns.bot.utils import (
     get_current_token,
     get_daily_capacity,
     get_text,
+    get_timecode_default,
     get_token_count,
     get_user_setting,
     initialize_user_settings,
@@ -352,3 +353,16 @@ class TestUserSettings:
         user_file = tmp_path / "state" / "users" / "99.json"
         data = json.loads(user_file.read_text(encoding="utf-8"))
         assert data["settings"]["context"] == "demo"
+
+
+class TestTimecodeDefault:
+    def test_reads_timecode_from_config_dict(self):
+        assert get_timecode_default({"timecode": True}) is True
+        assert get_timecode_default({"timecode": False}) is False
+
+    def test_missing_config_key_defaults_off(self):
+        assert get_timecode_default({}) is False
+
+    def test_missing_config_file_defaults_off(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("CONFIG_PATH", str(tmp_path / "missing.json"))
+        assert get_timecode_default() is False

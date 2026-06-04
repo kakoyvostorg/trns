@@ -17,7 +17,13 @@ from pydantic import BaseModel
 from pyrogram import Client
 from pyrogram.types import KeyboardButton, ReplyKeyboardMarkup
 
-from trns.bot.utils import _resolve_path, get_text, get_user_setting, load_metadata
+from trns.bot.utils import (
+    _resolve_path,
+    get_text,
+    get_timecode_default,
+    get_user_setting,
+    load_metadata,
+)
 
 # Configure logging
 logging.basicConfig(
@@ -135,6 +141,11 @@ def create_keyboard(metadata: dict, user_id: Optional[int] = None) -> ReplyKeybo
         # Get user settings (defaults to True)
         show_original = get_user_setting(user_id, "show_original_translation", default=True)
         show_transcription = get_user_setting(user_id, "show_transcription", default=True)
+        timecode_enabled = get_user_setting(
+            user_id,
+            "timecode_enabled",
+            default=get_timecode_default(),
+        )
 
         # Toggle button for original translation
         if show_original:
@@ -152,6 +163,12 @@ def create_keyboard(metadata: dict, user_id: Optional[int] = None) -> ReplyKeybo
 
         # Add toggle buttons in first row (side by side)
         keyboard.append([original_btn, transcription_btn])
+
+        if timecode_enabled:
+            timecode_btn_text = get_text(metadata, "hide_timecodes_button")
+        else:
+            timecode_btn_text = get_text(metadata, "show_timecodes_button")
+        keyboard.append([KeyboardButton(timecode_btn_text)])
 
     # Add context and cancel buttons
     keyboard.append([context_btn])

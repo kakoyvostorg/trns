@@ -105,6 +105,9 @@ def create_default_config(config_path=None):
         "lm_prompt_file": "prompt.md",
         "lm_prompt_original_file": "prompt_original.md",
         "lm_model": "google/gemma-3-27b-it:free",
+        "timecode": False,
+        "timecode_in_summary": False,
+        "timecode_min_interval_seconds": 30.0,
         "debug": False,
         "context": ""
     }
@@ -174,6 +177,9 @@ def apply_config_to_args(args, config, explicit_cli_keys=None):
         "lm_prompt_file": "lm_prompt_file",
         "lm_prompt_original_file": "lm_prompt_original_file",
         "lm_model": "lm_model",
+        "timecode": "timecode",
+        "timecode_in_summary": "timecode_in_summary",
+        "timecode_min_interval_seconds": "timecode_min_interval_seconds",
         "debug": "debug",
         "context": "context"
     }
@@ -203,7 +209,7 @@ def apply_config_to_args(args, config, explicit_cli_keys=None):
                 continue
 
             # Handle boolean values
-            if config_key in {"use_faster_whisper", "debug"}:
+            if config_key in {"use_faster_whisper", "debug", "timecode", "timecode_in_summary"}:
                 setattr(args, arg_name, bool(value))
             else:
                 setattr(args, arg_name, value)

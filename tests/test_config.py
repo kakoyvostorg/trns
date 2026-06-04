@@ -71,6 +71,22 @@ class TestApplyConfigToArgs:
         result = apply_config_to_args(minimal_args, config)
         assert result.use_faster_whisper is False
 
+    def test_timecode_bool_coercion(self, minimal_args):
+        config = {"timecode": True, "timecode_in_summary": True}
+        result = apply_config_to_args(minimal_args, config)
+        assert result.timecode is True
+        assert result.timecode_in_summary is True
+
+    def test_timecode_min_interval_applied(self, minimal_args):
+        config = {"timecode_min_interval_seconds": 12.5}
+        result = apply_config_to_args(minimal_args, config)
+        assert result.timecode_min_interval_seconds == 12.5
+
+    def test_zero_timecode_min_interval_is_applied(self, minimal_args):
+        config = {"timecode_min_interval_seconds": 0}
+        result = apply_config_to_args(minimal_args, config)
+        assert result.timecode_min_interval_seconds == 0
+
     def test_none_config_returns_args_unchanged(self, minimal_args):
         result = apply_config_to_args(minimal_args, None)
         assert result.method == "auto"
@@ -150,6 +166,12 @@ class TestCreateDefaultConfig:
         # Returned dict has required keys
         for key in ("method", "interval", "language", "whisper_model", "debug"):
             assert key in cfg
+
+    def test_timecode_defaults_are_present_and_off(self, tmp_path):
+        cfg = create_default_config(str(tmp_path / "config.json"))
+        assert cfg["timecode"] is False
+        assert cfg["timecode_in_summary"] is False
+        assert cfg["timecode_min_interval_seconds"] == 30.0
 
     def test_default_method_is_auto(self, tmp_path):
         cfg = create_default_config(str(tmp_path / "config.json"))

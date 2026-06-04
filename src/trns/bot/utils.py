@@ -325,6 +325,17 @@ def load_config(config_path: str = None) -> Dict:
         raise
 
 
+def get_timecode_default(config: Dict = None) -> bool:
+    """Return the operator-level default for bot timecodes."""
+    if config is not None:
+        return bool(config.get("timecode", False))
+
+    try:
+        return bool(load_config().get("timecode", False))
+    except Exception:
+        return False
+
+
 def save_config(config: Dict, config_path: str = "config.json"):
     """Save configuration to JSON file"""
     config_path = _resolve_path(config_path)
@@ -638,7 +649,8 @@ def set_user_setting(user_id: int, setting_key: str, value, settings_path: str =
 def initialize_user_settings(user_id: int, settings_path: str = None):
     """
     Initialize default settings for a new user.
-    Default: show_original_translation=True, show_transcription=True
+    Default: show_original_translation=True, show_transcription=True.
+    Timecodes intentionally stay config-backed until a user toggles them.
 
     Args:
         user_id: Telegram user ID

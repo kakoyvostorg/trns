@@ -81,6 +81,9 @@ Every key in `config.json` maps to a CLI flag. Here's what each one does:
 | `lm_api_key_file` | `--lm-api-key-file` | string (file path) | `"api_key.txt"` | File containing OpenRouter API key. |
 | `lm_prompt_file` | `--lm-prompt-file` | string (file path) | `"prompt.md"` | Prompt template for Russian-language LLM processing. |
 | `lm_model` | `--lm-model` | string | `"google/gemma-3-27b-it:free"` | OpenRouter model identifier. See [openrouter.ai/models](https://openrouter.ai/models) for options. Free models have `:free` suffix. |
+| `timecode` | `--timecode` | boolean | `false` | Prefix emitted transcription lines with `[MM:SS]` or `[HH:MM:SS]`. In the Telegram bot, this is the operator default for each user's Timecodes toggle. |
+| `timecode_in_summary` | `--timecode-in-summary` | boolean | `false` | Inject sparse timecode markers into the transcript window sent to the LM so summaries can cite moments. |
+| `timecode_min_interval_seconds` | `--timecode-min-interval-seconds` | number | `30.0` | Minimum source-video seconds between LM prompt timecode markers. Use `0` to allow every anchor. |
 | `debug` | `--debug` | boolean | `false` | **false** (production): logs go to `logs.txt`, stdout shows only transcription/LLM output. **true**: verbose logs go to stderr, useful for troubleshooting. |
 | `context` | `--context` | string | `""` | Additional context passed to the LLM (e.g. "This is a Sberbank earnings call"). Helps the model produce better summaries. |
 | `allowed_user_ids` | — | array of integers | `[]` | Optional legacy/preauthorized Telegram user IDs. New runtime authentications are stored in per-user files under `TRNS_STATE_DIR`. |
@@ -105,6 +108,9 @@ Every key in `config.json` maps to a CLI flag. Here's what each one does:
   "lm_api_key_file": "api_key.txt",
   "lm_prompt_file": "prompt.md",
   "lm_model": "google/gemma-3-27b-it:free",
+  "timecode": false,
+  "timecode_in_summary": false,
+  "timecode_min_interval_seconds": 30.0,
   "debug": false,
   "context": "",
   "allowed_user_ids": []
