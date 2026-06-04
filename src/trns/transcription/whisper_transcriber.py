@@ -9,6 +9,7 @@ Extracts audio from YouTube video and processes it in chunks.
 import logging
 import os
 import re
+import subprocess
 import time
 from typing import Optional, Tuple
 
@@ -20,6 +21,40 @@ def _is_local_file(path: str) -> bool:
     if path.startswith("http://") or path.startswith("https://"):
         return False
     return os.path.exists(path)
+
+
+def _probe_local_media_info(path: str) -> dict:
+    """Return minimal metadata for a local media file without using yt-dlp."""
+    info = {
+        "is_live": False,
+        "duration": None,
+        "title": os.path.basename(path),
+        "description": "",
+    }
+    try:
+        result = subprocess.run(
+            [
+                "ffprobe",
+                "-v",
+                "error",
+                "-show_entries",
+                "format=duration",
+                "-of",
+                "default=noprint_wrappers=1:nokey=1",
+                path,
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        duration_text = (result.stdout or "").strip()
+        if result.returncode == 0 and duration_text:
+            info["duration"] = float(duration_text)
+        elif result.stderr:
+            logger.debug("ffprobe could not read duration for %s: %s", path, result.stderr.strip())
+    except (OSError, ValueError) as e:
+        logger.debug("Could not probe local media %s: %s", path, e)
+    return info
 
 
 class WhisperTranscriber:
@@ -81,6 +116,56 @@ class WhisperTranscriber:
                     pass
         except Exception:
             pass
+
+    @staticmethod
+    def _extract_local_audio_file(
+        video_path: str,
+        audio_path: str,
+        start_time: Optional[float] = None,
+        duration: Optional[float] = None,
+    ) -> Optional[str]:
+        """Extract WAV audio from a local media file with ffmpeg."""
+        command = ["ffmpeg", "-y"]
+        if start_time is not None:
+            command.extend(["-ss", str(start_time)])
+        command.extend(["-i", video_path])
+        if duration is not None:
+            command.extend(["-t", str(duration)])
+        command.extend([
+            "-vn",
+            "-acodec",
+            "pcm_s16le",
+            "-ar",
+            "16000",
+            "-ac",
+            "1",
+            audio_path,
+        ])
+
+        try:
+            result = subprocess.run(
+                command,
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+        except OSError as e:
+            logger.error("ffmpeg failed to start for local file %s: %s", video_path, e)
+            return None
+
+        if result.returncode != 0:
+            logger.error(
+                "ffmpeg failed to extract local audio from %s: %s",
+                video_path,
+                (result.stderr or "").strip(),
+            )
+            return None
+
+        if os.path.exists(audio_path) and os.path.getsize(audio_path) > 0:
+            return audio_path
+
+        logger.error("ffmpeg completed but did not create audio file: %s", audio_path)
+        return None
 
     def _initialize_model(self):
         """Initialize the Whisper models.
@@ -211,15 +296,6 @@ class WhisperTranscriber:
         Returns:
             Video info dict or None if failed
         """
-        import yt_dlp
-
-        # Determine URL: local file, full URL, or YouTube video ID
-        if _is_local_file(video_id):
-            url = video_id
-        elif video_id.startswith("http://") or video_id.startswith("https://"):
-            url = video_id
-        else:
-            url = f"https://www.youtube.com/watch?v={video_id}"
         current_time = time.time()
 
         # Check cache
@@ -232,6 +308,25 @@ class WhisperTranscriber:
                 return cached['info']
             else:
                 logger.debug(f"Cache expired (age: {age:.1f}s), refreshing...")
+
+        if _is_local_file(video_id):
+            logger.info(f"Fetching local media info for: {video_id}")
+            info = _probe_local_media_info(video_id)
+            self._video_info_cache[video_id] = {
+                'info': info,
+                'timestamp': current_time,
+                'is_live': False,
+            }
+            logger.info("Local media info cached. Is live: False")
+            return info
+
+        import yt_dlp
+
+        # Determine URL: full URL or YouTube video ID
+        if video_id.startswith("http://") or video_id.startswith("https://"):
+            url = video_id
+        else:
+            url = f"https://www.youtube.com/watch?v={video_id}"
 
         # Fetch fresh info
         logger.info(f"Fetching video info for: {video_id}")
@@ -291,14 +386,32 @@ class WhisperTranscriber:
         try:
             import tempfile
 
-            import yt_dlp
-
-            # Determine URL: local file, full URL, or YouTube video ID
             if _is_local_file(video_id):
-                url = video_id
                 url_hash = str(hash(video_id))[:8]
                 audio_filename = f"local_audio_{url_hash}_{int(start_time)}_{int(time.time())}.wav"
-            elif video_id.startswith("http://") or video_id.startswith("https://"):
+                audio_path = os.path.join(tempfile.gettempdir(), audio_filename)
+
+                if self._check_shutdown():
+                    logger.debug("Shutdown requested before local audio extraction")
+                    return None
+
+                logger.info(
+                    "Extracting local audio chunk from %ss for %ss (file: %s)",
+                    start_time,
+                    duration,
+                    video_id,
+                )
+                return self._extract_local_audio_file(
+                    video_id,
+                    audio_path,
+                    start_time=start_time,
+                    duration=duration,
+                )
+
+            import yt_dlp
+
+            # Determine URL: full URL or YouTube video ID
+            if video_id.startswith("http://") or video_id.startswith("https://"):
                 url = video_id
                 url_hash = str(hash(video_id))[:8]
                 audio_filename = f"video_audio_{url_hash}_{int(start_time)}_{int(time.time())}.wav"
@@ -485,14 +598,37 @@ class WhisperTranscriber:
             import tempfile
             import threading
 
+            if _is_local_file(video_id):
+                url_hash = str(hash(video_id))[:8]
+                suffix = f"_{int(start_time)}" if start_time is not None else ""
+                audio_filename = f"local_audio_{url_hash}{suffix}_{int(time.time())}.wav"
+                audio_path = os.path.join(tempfile.gettempdir(), audio_filename)
+
+                if self._check_shutdown():
+                    logger.debug("Shutdown requested before local audio extraction")
+                    return None
+
+                if start_time is not None:
+                    logger.info(
+                        "Extracting local audio chunk from %ss for %ss (file: %s)",
+                        start_time,
+                        duration,
+                        video_id,
+                    )
+                else:
+                    logger.info("Extracting audio from local media file: %s", video_id)
+
+                return self._extract_local_audio_file(
+                    video_id,
+                    audio_path,
+                    start_time=start_time,
+                    duration=duration if start_time is not None else None,
+                )
+
             import yt_dlp
 
-            # Determine URL: local file, full URL, or YouTube video ID
-            if _is_local_file(video_id):
-                url = video_id
-                url_hash = str(hash(video_id))[:8]
-                audio_filename = f"local_audio_{url_hash}_{int(time.time())}.wav"
-            elif video_id.startswith("http://") or video_id.startswith("https://"):
+            # Determine URL: full URL or YouTube video ID
+            if video_id.startswith("http://") or video_id.startswith("https://"):
                 url = video_id
                 url_hash = str(hash(video_id))[:8]
                 audio_filename = f"video_audio_{url_hash}_{int(time.time())}.wav"
@@ -1022,4 +1158,3 @@ class WhisperTranscriber:
             passthrough = [dict(s) for s in segments]
             joined = " ".join(s.get('text', '') for s in passthrough).strip()
             return joined, passthrough
-
