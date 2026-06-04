@@ -715,6 +715,11 @@ class LMProcessor:
                 # If original failed but Russian succeeded, return Russian only
                 logger.warning("Original language processing failed, returning Russian only")
                 return russian_output
+            elif original_output:
+                # If Russian failed but original succeeded, still return the
+                # usable report instead of dropping the whole LM response.
+                logger.warning("Russian processing failed, returning original language only")
+                return original_output
             else:
                 logger.error("Both original and Russian processing failed")
                 return None

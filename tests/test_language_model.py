@@ -195,6 +195,17 @@ class TestProcessTranscriptionWindow:
         result = proc.process_transcription_window(self._make_transcriptions())
         assert result == "отчёт"
 
+    def test_bilingual_fallback_to_original_when_russian_fails(self):
+        proc = make_lm_processor(
+            window_seconds=120, interval=30,
+            use_bilingual=True, detected_language="en",
+        )
+        proc.process_original_language = MagicMock(return_value="english report")
+        proc.process_russian_translation = MagicMock(return_value=None)  # fails
+
+        result = proc.process_transcription_window(self._make_transcriptions())
+        assert result == "english report"
+
     def test_bilingual_returns_none_when_both_fail(self):
         proc = make_lm_processor(
             window_seconds=120, interval=30,
