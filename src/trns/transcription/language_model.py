@@ -107,6 +107,7 @@ def _serialize_window_with_timecodes(
     min_interval = max(0.0, float(min_interval_seconds))
 
     out_parts: List[str] = []
+    marker_count = 0
     # Track the last emitted marker time across the whole window so spacing
     # holds across transcription boundaries, not just within each dict.
     last_emitted_time: Optional[float] = None
@@ -148,6 +149,7 @@ def _serialize_window_with_timecodes(
                 # Leading space keeps markers visually separated from prior
                 # text; it gets normalized by downstream .strip()/join logic.
                 rebuilt.append(f" {marker} ")
+                marker_count += 1
                 last_emitted_time = t_abs
                 prev_offset = off
             # else: anchor is too close to previous marker — skip emission.
@@ -158,7 +160,13 @@ def _serialize_window_with_timecodes(
 
     # Join the per-dict pieces with a space; the serializer never introduces
     # extra newlines so downstream LM prompt formatting stays predictable.
-    return ' '.join(p for p in out_parts if p).strip()
+    serialized = ' '.join(p for p in out_parts if p).strip()
+    logger.debug(
+        "Serialized transcript window with %d timecode markers using %s anchors",
+        marker_count,
+        anchor_key,
+    )
+    return serialized
 
 
 class LMProcessor:

@@ -16,7 +16,7 @@ from datetime import datetime
 from typing import Callable, Optional
 
 from .language_model import LMProcessor
-from .subtitle_extractor import YouTubeSubtitleExtractor
+from .subtitle_extractor import YouTubeSubtitleExtractor, YtDlpSubtitleExtractor
 from .whisper_transcriber import WhisperTranscriber, _is_local_file
 
 logger = logging.getLogger(__name__)
@@ -186,6 +186,72 @@ def extract_video_id(url_or_id: str) -> str:
     return url_or_id
 
 
+def _source_kind(source: str) -> str:
+    if _is_local_file(source):
+        return "local"
+    value = source or ""
+    if "youtube.com" in value or "youtu.be" in value:
+        return "youtube"
+    if not value.startswith(("http://", "https://")) and re.fullmatch(r"[\w-]{11}", value):
+        return "youtube"
+    if value.startswith(("http://", "https://")):
+        if "x.com/" in value or "twitter.com/" in value:
+            return "x"
+        return "remote"
+    return "unknown"
+
+
+def _split_text_by_sparse_anchors(text: str, anchors, min_interval_seconds: float):
+    """Split a full transcript into sparse timecoded spans using anchor offsets."""
+    text = (text or "").strip()
+    if not text or not anchors:
+        return []
+    min_interval = max(0.0, float(min_interval_seconds or 0.0))
+    clean_anchors = []
+    for anchor in anchors:
+        try:
+            offset = int(anchor.get("offset", 0))
+            time_value = float(anchor.get("time", 0.0))
+        except (TypeError, ValueError, AttributeError):
+            continue
+        if 0 <= offset <= len(text):
+            clean_anchors.append({"offset": offset, "time": time_value})
+    clean_anchors.sort(key=lambda item: (item["offset"], item["time"]))
+    if not clean_anchors:
+        return []
+
+    selected = []
+    last_time = None
+    for anchor in clean_anchors:
+        if last_time is None or (anchor["time"] - last_time) >= min_interval:
+            selected.append(anchor)
+            last_time = anchor["time"]
+    if not selected:
+        return []
+
+    spans = []
+    for index, anchor in enumerate(selected):
+        start = anchor["offset"]
+        end = selected[index + 1]["offset"] if index + 1 < len(selected) else len(text)
+        piece = text[start:end].strip()
+        if piece:
+            spans.append((anchor["time"], piece))
+    return spans
+
+
+def _next_non_live_chunk_position(
+    chunk_start: float,
+    chunk_duration: float,
+    overlap_seconds: float,
+    video_duration: Optional[float],
+) -> float:
+    """Return the next seek position after a successful non-live chunk extraction."""
+    next_position = float(chunk_start or 0.0) + float(chunk_duration or 0.0)
+    if video_duration is not None and next_position >= float(video_duration):
+        return float(video_duration)
+    return max(float(chunk_start or 0.0), next_position - float(overlap_seconds or 0.0))
+
+
 class TranscriptionPipeline:
     """
     Main transcription pipeline that orchestrates audio extraction,
@@ -291,12 +357,30 @@ class TranscriptionPipeline:
         """Initialize subtitle extractor, whisper transcriber, and LM processor"""
         # Local files always use whisper, no subtitles available
         is_local = _is_local_file(self.video_id)
+        source_kind = _source_kind(self.video_id)
+        logger.info("Source kind: %s", source_kind)
 
         # Initialize subtitle extractor if needed (skip for local files)
         if not is_local and self.args.method in ["auto", "subtitles"]:
-            self.subtitle_extractor = YouTubeSubtitleExtractor(self.video_id)
+            if source_kind == "youtube":
+                self.subtitle_extractor = YouTubeSubtitleExtractor(self.video_id)
+                subtitle_provider = "youtube-transcript-api"
+            elif source_kind in {"x", "remote"}:
+                self.subtitle_extractor = YtDlpSubtitleExtractor(
+                    self.video_id,
+                    yt_dlp_cookie_file=getattr(self.args, "yt_dlp_cookie_file", None),
+                    yt_dlp_cookies_from_browser=getattr(self.args, "yt_dlp_cookies_from_browser", None),
+                )
+                subtitle_provider = "yt-dlp"
+            else:
+                self.subtitle_extractor = None
+                subtitle_provider = "none"
+            logger.info("Subtitle provider candidate: %s", subtitle_provider)
             logger.info("Checking for available subtitles...")
-            available, languages = self.subtitle_extractor.check_subtitles_available()
+            available, languages = (
+                self.subtitle_extractor.check_subtitles_available()
+                if self.subtitle_extractor else (False, [])
+            )
 
             if available:
                 logger.info(f"✓ Subtitles available in: {', '.join(languages)}")
@@ -306,12 +390,15 @@ class TranscriptionPipeline:
                 else:
                     self.use_subtitles = True
             else:
-                logger.warning("No subtitles available for this video")
+                logger.warning("No subtitles available for this source")
                 if self.args.method == "subtitles":
                     logger.error("Subtitles requested but not available.")
-                    raise RuntimeError("Subtitles requested but not available for this video")
+                    raise RuntimeError("Subtitles requested but not available for this source")
                 elif self.args.method == "auto":
-                    logger.info("Falling back to Whisper transcription")
+                    if source_kind == "x":
+                        logger.info("X/Twitter did not expose subtitles; falling back to Whisper")
+                    else:
+                        logger.info("Falling back to Whisper transcription")
                     self.use_subtitles = False
                     self.use_whisper = True
         else:
@@ -326,7 +413,9 @@ class TranscriptionPipeline:
                     self.whisper_transcriber = WhisperTranscriber(
                         model_size=self.args.whisper_model,
                         use_faster_whisper=self.args.use_faster_whisper,
-                        shutdown_flag=self.shutdown_flag
+                        shutdown_flag=self.shutdown_flag,
+                        yt_dlp_cookie_file=getattr(self.args, "yt_dlp_cookie_file", None),
+                        yt_dlp_cookies_from_browser=getattr(self.args, "yt_dlp_cookies_from_browser", None),
                     )
                     logger.info("Whisper transcriber initialized")
                     self.use_whisper = True
@@ -716,11 +805,25 @@ class TranscriptionPipeline:
                 # Build anchors first so we can source a timecode for display.
                 _, full_anchors = _build_anchors(full_video_segments, chunk_start=0.0)
                 _, full_anchors_translated = _build_anchors(full_translated_segments, chunk_start=0.0)
-                full_video_tc = full_anchors[0]['time'] if full_anchors else 0.0
-                self._output_transcription(
-                    timestamp, text, translated_text, detected_language, language_prob,
-                    timecode=full_video_tc,
+                logger.info(
+                    "Full-mode anchor counts: original=%d translated=%d",
+                    len(full_anchors),
+                    len(full_anchors_translated),
                 )
+                if not self._output_full_transcription_with_timecodes(
+                    timestamp,
+                    text,
+                    translated_text,
+                    detected_language,
+                    language_prob,
+                    full_anchors,
+                    full_anchors_translated,
+                ):
+                    full_video_tc = full_anchors[0]['time'] if full_anchors else 0.0
+                    self._output_transcription(
+                        timestamp, text, translated_text, detected_language, language_prob,
+                        timecode=full_video_tc,
+                    )
                 entry = {
                     'timestamp': timestamp,
                     'text': text,
@@ -765,6 +868,92 @@ class TranscriptionPipeline:
             self.process_mode = "chunked"
             return False
 
+    def _sync_detected_language(self, language: str):
+        """Keep pipeline and LM language state in sync after detection."""
+        if language and language != "unknown":
+            self.detected_language = language
+            if self.lm_processor:
+                self.lm_processor.detected_language = language
+                if self.lm_processor.use_bilingual:
+                    try:
+                        self.lm_processor._load_prompts()
+                    except Exception as e:
+                        logger.warning(f"Failed to reload prompt after language detection: {e}")
+
+    def _timecode_prefix(self, timecode: Optional[float]) -> str:
+        if self.timecode_mode and timecode is not None:
+            force_hours = (
+                isinstance(self.video_duration, (int, float))
+                and self.video_duration >= 3600
+            )
+            return _format_timecode(timecode, force_hours=force_hours) + " "
+        return ""
+
+    def _output_full_transcription_with_timecodes(
+        self,
+        timestamp: str,
+        text: str,
+        translated_text: str,
+        language: str,
+        language_prob: float,
+        anchors,
+        anchors_translated,
+    ) -> bool:
+        """Emit full-mode text as sparse timecoded spans when possible."""
+        if not self.timecode_mode:
+            return False
+
+        min_interval = getattr(self.args, "timecode_min_interval_seconds", 30.0)
+        translated_spans = _split_text_by_sparse_anchors(
+            translated_text,
+            anchors_translated or anchors,
+            min_interval,
+        )
+        original_spans = _split_text_by_sparse_anchors(text, anchors, min_interval)
+
+        use_original = self.show_original_translation and language not in {"ru", "unknown"}
+        if use_original and not original_spans:
+            return False
+        if not translated_spans:
+            return False
+
+        self._sync_detected_language(language)
+        lm_output_mode = getattr(self.args, 'lm_output_mode', 'both')
+
+        logger.info(
+            "Rendering full transcript with timecodes: original_markers=%d translated_markers=%d interval=%ss",
+            len(original_spans),
+            len(translated_spans),
+            min_interval,
+        )
+
+        if lm_output_mode not in {"transcriptions-only", "both"}:
+            logger.debug("Full transcription output suppressed by LM output mode")
+        elif not self.show_transcription:
+            logger.debug("Full transcription output suppressed by user setting")
+        else:
+            if use_original:
+                for time_value, piece in original_spans:
+                    self._output(f"\n{self._timecode_prefix(time_value)}[{language}] {piece}\n")
+                for time_value, piece in translated_spans:
+                    self._output(f"\n{self._timecode_prefix(time_value)}{piece} [.]\n")
+            else:
+                for time_value, piece in translated_spans:
+                    self._output(f"\n{self._timecode_prefix(time_value)}{piece}\n")
+
+        if self.args.save_transcript:
+            try:
+                with open(self.args.save_transcript, 'a', encoding='utf-8') as f:
+                    if use_original:
+                        for time_value, piece in original_spans:
+                            f.write(f"[{timestamp}] {self._timecode_prefix(time_value)}{piece}\n")
+                    if self.args.translation_output in ["russian-only", "both"]:
+                        for time_value, piece in translated_spans:
+                            f.write(f"[{timestamp}] [RU] {self._timecode_prefix(time_value)}{piece}\n")
+            except Exception as e:
+                logger.warning(f"Failed to save transcript: {e}")
+        return True
+
     def _output_transcription(self, timestamp: str, text: str, translated_text: str, language: str, language_prob: float, iteration: Optional[int] = None, timecode: Optional[float] = None):
         """Output transcription based on output mode and user settings.
 
@@ -773,30 +962,13 @@ class TranscriptionPipeline:
         prefix appears in both the live output and the saved transcript file.
         """
         # Update detected language for LM processor
-        if language and language != "unknown":
-            self.detected_language = language
-            # Update LM processor's detected language if it exists
-            if self.lm_processor:
-                self.lm_processor.detected_language = language
-                # Reload prompt if language changed and bilingual mode is on
-                if self.lm_processor.use_bilingual:
-                    try:
-                        self.lm_processor._load_prompts()
-                    except Exception as e:
-                        logger.warning(f"Failed to reload prompt after language detection: {e}")
+        self._sync_detected_language(language)
 
         lm_output_mode = getattr(self.args, 'lm_output_mode', 'both')
 
         # Build the per-line timecode prefix once for reuse below. Empty when
         # timecode mode is off or no timecode is provided.
-        if self.timecode_mode and timecode is not None:
-            force_hours = (
-                isinstance(self.video_duration, (int, float))
-                and self.video_duration >= 3600
-            )
-            tc_prefix = _format_timecode(timecode, force_hours=force_hours) + " "
-        else:
-            tc_prefix = ""
+        tc_prefix = self._timecode_prefix(timecode)
 
         # Check if we should output transcription
         if not self.show_transcription:
@@ -1088,24 +1260,34 @@ class TranscriptionPipeline:
                             if text.strip():
                                 logger.info(f"📝 Subtitles ({len(segments)} segments): {text[:100]}..." if len(text) > 100 else f"📝 Subtitles ({len(segments)} segments): {text}")
 
-                                # Translate subtitles if needed (for LM processing).
-                                # We keep the existing bulk translate_to_russian
-                                # call here — per-segment Russian anchors for the
-                                # subtitle path would require routing subtitle
-                                # dicts through translate_segments_to_russian,
-                                # which reads 'end' (subtitles only have
-                                # 'duration'). Deferred. The LM serializer
-                                # handles the missing anchors_translated key by
-                                # falling through to plain text.
                                 translated_text = text
+                                subtitle_anchors_translated = list(subtitle_anchors)
                                 if self.args.language != 'ru' and self.whisper_transcriber:
                                     try:
-                                        translated_text = self.whisper_transcriber.translate_to_russian(text, self.args.language)
+                                        subtitle_segments_for_translation = [
+                                            {
+                                                **seg,
+                                                "end": float(seg.get("start", 0.0) or 0.0)
+                                                + float(seg.get("duration", 0.0) or 0.0),
+                                            }
+                                            for seg in segments
+                                        ]
+                                        translated_text, translated_segments = (
+                                            self.whisper_transcriber.translate_segments_to_russian(
+                                                subtitle_segments_for_translation,
+                                                self.args.language,
+                                            )
+                                        )
+                                        _, subtitle_anchors_translated = _build_anchors(
+                                            translated_segments,
+                                            chunk_start=0.0,
+                                        )
                                     except Exception as e:
                                         logger.debug(
                                             "Subtitle translation failed, using original: %s", e, exc_info=True
                                         )
                                         translated_text = text  # Fallback to original if translation fails
+                                        subtitle_anchors_translated = list(subtitle_anchors)
 
                                 # Store in cumulative list
                                 subtitle_entry = {
@@ -1118,6 +1300,8 @@ class TranscriptionPipeline:
                                 }
                                 if subtitle_anchors:
                                     subtitle_entry['anchors'] = subtitle_anchors
+                                if subtitle_anchors_translated:
+                                    subtitle_entry['anchors_translated'] = subtitle_anchors_translated
                                 self.all_transcribed_text.append(subtitle_entry)
 
                                 if self.last_transcription_text is not None and text.strip() == self.last_transcription_text.strip():
@@ -1133,24 +1317,23 @@ class TranscriptionPipeline:
                                     self._consecutive_duplicates = 0
                                     self.last_transcription_text = text
 
-                                # Output transcription. The subtitle path emits
-                                # inline rather than via _output_transcription,
-                                # so it wires the timecode prefix itself using
-                                # the head anchor.
-                                if self.timecode_mode and subtitle_anchors:
-                                    force_hours = (
-                                        isinstance(self.video_duration, (int, float))
-                                        and self.video_duration >= 3600
-                                    )
-                                    sub_tc_prefix = _format_timecode(
-                                        subtitle_anchors[0]['time'],
-                                        force_hours=force_hours,
-                                    ) + " "
-                                else:
-                                    sub_tc_prefix = ""
-
                                 lm_output_mode = getattr(self.args, 'lm_output_mode', 'both')
-                                if lm_output_mode == "transcriptions-only" or lm_output_mode == "both":
+                                handled_timecoded_output = self._output_full_transcription_with_timecodes(
+                                    timestamp,
+                                    text,
+                                    translated_text,
+                                    self.args.language,
+                                    1.0,
+                                    subtitle_anchors,
+                                    subtitle_anchors_translated,
+                                )
+                                if (
+                                    not handled_timecoded_output
+                                    and (lm_output_mode == "transcriptions-only" or lm_output_mode == "both")
+                                ):
+                                    sub_tc_prefix = self._timecode_prefix(
+                                        subtitle_anchors[0]['time'] if subtitle_anchors else None
+                                    )
                                     # Use user setting for showing original
                                     if self.show_original_translation and self.args.language != "ru":
                                         self._output(f"\n{sub_tc_prefix}[{self.args.language}] {text}\n")
@@ -1159,9 +1342,12 @@ class TranscriptionPipeline:
                                         self._output(f"\n{sub_tc_prefix}{translated_text}\n")
 
                                 # Save to file if requested
-                                if self.args.save_transcript:
+                                if self.args.save_transcript and not handled_timecoded_output:
                                     try:
                                         with open(self.args.save_transcript, 'a', encoding='utf-8') as f:
+                                            sub_tc_prefix = self._timecode_prefix(
+                                                subtitle_anchors[0]['time'] if subtitle_anchors else None
+                                            )
                                             f.write(f"[{timestamp}] {sub_tc_prefix}{text}\n")
                                             if self.args.translation_output in ["russian-only", "both"]:
                                                 f.write(f"[{timestamp}] [RU] {sub_tc_prefix}{translated_text}\n")
@@ -1331,8 +1517,6 @@ class TranscriptionPipeline:
                                     start_time=self.current_time_position
                                 )
                                 extract_time = time.time() - extract_start
-                                # Update position for next chunk (account for overlap)
-                                self.current_time_position += chunk_duration - self.overlap_seconds
                             else:
                                 # For live streams, use normal extraction.
                                 # Anchors are emitted relative to capture start — the
@@ -1351,12 +1535,36 @@ class TranscriptionPipeline:
 
                             # Check if audio extraction failed
                             if not audio_path:
-                                error_msg = f"\n[ERROR] Failed to extract audio chunk at {self.current_time_position:.1f}s. Skipping this chunk.\n"
-                                logger.error(f"Audio extraction failed at {self.current_time_position:.1f}s")
+                                consecutive_failures += 1
+                                error_msg = (
+                                    f"\n[ERROR] Failed to extract audio chunk at {this_chunk_start:.1f}s "
+                                    f"({consecutive_failures}/{max_consecutive_failures}). Retrying this position.\n"
+                                )
+                                logger.error(
+                                    "Audio extraction failed at %.1fs (consecutive failures: %d)",
+                                    this_chunk_start,
+                                    consecutive_failures,
+                                )
                                 self._output(error_msg)
+                                if consecutive_failures >= max_consecutive_failures:
+                                    error_msg = f"\n[ERROR] Too many consecutive failures ({consecutive_failures}). Stopping transcription.\n"
+                                    logger.error(f"Stopping transcription due to {consecutive_failures} consecutive failures")
+                                    self._output(error_msg)
+                                    break
                                 # Wait a bit before retrying next chunk
                                 time.sleep(2)
                                 continue
+
+                            if not self.is_live_video and self.process_mode == "chunked":
+                                next_position = this_chunk_start + chunk_duration
+                                self.current_time_position = _next_non_live_chunk_position(
+                                    this_chunk_start,
+                                    chunk_duration,
+                                    self.overlap_seconds,
+                                    self.video_duration,
+                                )
+                                if self.video_duration and self.current_time_position >= self.video_duration:
+                                    logger.info("Attempted final non-live chunk ending at %.1fs", next_position)
 
                             # For first chunk, transcribe immediately (no previous chunk to overlap with)
                             if first_chunk and audio_path:

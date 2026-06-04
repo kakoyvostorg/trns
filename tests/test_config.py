@@ -87,6 +87,15 @@ class TestApplyConfigToArgs:
         result = apply_config_to_args(minimal_args, config)
         assert result.timecode_min_interval_seconds == 0
 
+    def test_yt_dlp_cookie_config_applied(self, minimal_args):
+        config = {
+            "yt_dlp_cookie_file": "/tmp/cookies.txt",
+            "yt_dlp_cookies_from_browser": "firefox",
+        }
+        result = apply_config_to_args(minimal_args, config)
+        assert result.yt_dlp_cookie_file == "/tmp/cookies.txt"
+        assert result.yt_dlp_cookies_from_browser == "firefox"
+
     def test_none_config_returns_args_unchanged(self, minimal_args):
         result = apply_config_to_args(minimal_args, None)
         assert result.method == "auto"
@@ -172,6 +181,11 @@ class TestCreateDefaultConfig:
         assert cfg["timecode"] is False
         assert cfg["timecode_in_summary"] is False
         assert cfg["timecode_min_interval_seconds"] == 30.0
+
+    def test_yt_dlp_cookie_defaults_are_present_and_off(self, tmp_path):
+        cfg = create_default_config(str(tmp_path / "config.json"))
+        assert cfg["yt_dlp_cookie_file"] is None
+        assert cfg["yt_dlp_cookies_from_browser"] is None
 
     def test_default_method_is_auto(self, tmp_path):
         cfg = create_default_config(str(tmp_path / "config.json"))

@@ -9,6 +9,10 @@ def _bare_transcriber():
     transcriber.shutdown_flag = None
     transcriber._video_info_cache = {}
     transcriber._cache_ttl = 300
+    transcriber.yt_dlp_cookie_file = None
+    transcriber.yt_dlp_cookies_from_browser = None
+    transcriber.yt_dlp_retries = 3
+    transcriber.yt_dlp_socket_timeout = 20
     return transcriber
 
 
@@ -89,3 +93,16 @@ def test_extract_local_audio_chunk_passes_time_range(monkeypatch, tmp_path):
     assert command[3] == "3"
     assert "-t" in command
     assert command[command.index("-t") + 1] == "12"
+
+
+def test_yt_dlp_cookie_file_preferred_over_browser_cookies():
+    transcriber = _bare_transcriber()
+    transcriber.yt_dlp_cookie_file = "/tmp/cookies.txt"
+    transcriber.yt_dlp_cookies_from_browser = "firefox"
+
+    opts = transcriber._build_yt_dlp_opts(format="bestaudio/best")
+
+    assert opts["cookiefile"] == "/tmp/cookies.txt"
+    assert "cookiesfrombrowser" not in opts
+    assert opts["retries"] == 3
+    assert opts["socket_timeout"] == 20

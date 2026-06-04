@@ -14,10 +14,13 @@
   "lm_output_mode": "both",
   "lm_api_key_file": "api_key.txt",
   "lm_prompt_file": "prompt.md",
+  "lm_prompt_original_file": "prompt_original.md",
   "lm_model": "google/gemma-3-27b-it:free",
   "timecode": false,
   "timecode_in_summary": false,
   "timecode_min_interval_seconds": 30.0,
+  "yt_dlp_cookie_file": null,
+  "yt_dlp_cookies_from_browser": null,
   "debug": false,
   "context": "",
   "allowed_user_ids": []

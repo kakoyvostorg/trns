@@ -53,6 +53,8 @@ _CONFIG = {
     "timecode": True,
     "timecode_in_summary": False,
     "timecode_min_interval_seconds": 7.0,
+    "yt_dlp_cookie_file": None,
+    "yt_dlp_cookies_from_browser": None,
     "debug": False,
     "context": "",
 }

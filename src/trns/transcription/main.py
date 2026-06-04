@@ -108,6 +108,8 @@ def create_default_config(config_path=None):
         "timecode": False,
         "timecode_in_summary": False,
         "timecode_min_interval_seconds": 30.0,
+        "yt_dlp_cookie_file": None,
+        "yt_dlp_cookies_from_browser": None,
         "debug": False,
         "context": ""
     }
@@ -180,6 +182,8 @@ def apply_config_to_args(args, config, explicit_cli_keys=None):
         "timecode": "timecode",
         "timecode_in_summary": "timecode_in_summary",
         "timecode_min_interval_seconds": "timecode_min_interval_seconds",
+        "yt_dlp_cookie_file": "yt_dlp_cookie_file",
+        "yt_dlp_cookies_from_browser": "yt_dlp_cookies_from_browser",
         "debug": "debug",
         "context": "context"
     }
@@ -397,6 +401,18 @@ Examples:
         ),
     )
     parser.add_argument(
+        "--yt-dlp-cookie-file",
+        type=str,
+        default=None,
+        help="Path to cookies.txt for yt-dlp. Takes precedence over --yt-dlp-cookies-from-browser.",
+    )
+    parser.add_argument(
+        "--yt-dlp-cookies-from-browser",
+        type=str,
+        default=None,
+        help="Browser name/profile string for yt-dlp cookiesfrombrowser (for example: chrome or firefox:default).",
+    )
+    parser.add_argument(
         "--debug",
         action="store_true",
         default=False,
@@ -492,6 +508,8 @@ Examples:
     args.lm_prompt_original_file = _resolve(getattr(args, 'lm_prompt_original_file', 'prompt_original.md'))
     if args.save_transcript:
         args.save_transcript = _resolve(args.save_transcript)
+    if getattr(args, 'yt_dlp_cookie_file', None):
+        args.yt_dlp_cookie_file = _resolve(args.yt_dlp_cookie_file)
     args.metadata_path = _resolve("metadata.json")
     state_dir = os.environ.get("TRNS_STATE_DIR", "state")
     if not os.path.isabs(state_dir):

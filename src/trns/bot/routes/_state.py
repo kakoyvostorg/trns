@@ -26,6 +26,8 @@ def _resolve_args_paths(args):
     args.lm_prompt_file = _resolve(getattr(args, "lm_prompt_file", "prompt.md"))
     args.lm_prompt_original_file = _resolve(getattr(args, "lm_prompt_original_file", "prompt_original.md"))
     args.metadata_path = _resolve(getattr(args, "metadata_path", "metadata.json"))
+    if getattr(args, "yt_dlp_cookie_file", None):
+        args.yt_dlp_cookie_file = _resolve(args.yt_dlp_cookie_file)
     state_dir = os.environ.get("TRNS_STATE_DIR", "state")
     if not os.path.isabs(state_dir):
         state_dir = os.path.join(_trns_home, state_dir)

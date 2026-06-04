@@ -2,7 +2,7 @@
 Tests for extract_video_id — the pure URL-parsing helper used by the pipeline.
 """
 
-from trns.transcription.pipeline import extract_video_id
+from trns.transcription.pipeline import _next_non_live_chunk_position, extract_video_id
 
 
 class TestExtractVideoId:
@@ -84,3 +84,14 @@ class TestExtractVideoId:
 
     def test_shorts_url_with_query(self):
         assert extract_video_id("https://youtube.com/shorts/dQw4w9WgXcQ?feature=share") == "dQw4w9WgXcQ"
+
+
+class TestNextNonLiveChunkPosition:
+    def test_regular_chunk_keeps_overlap(self):
+        assert _next_non_live_chunk_position(0.0, 30.0, 2.0, 100.0) == 28.0
+
+    def test_final_chunk_marks_video_complete(self):
+        assert _next_non_live_chunk_position(38.5, 2.0, 2.0, 40.5) == 40.5
+
+    def test_overlap_never_moves_cursor_backwards(self):
+        assert _next_non_live_chunk_position(38.0, 1.0, 2.0, 100.0) == 38.0

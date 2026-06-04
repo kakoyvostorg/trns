@@ -9,7 +9,11 @@ method reads. This keeps tests fast and offline.
 
 import types
 
-from trns.transcription.pipeline import TranscriptionPipeline, _format_timecode
+from trns.transcription.pipeline import (
+    TranscriptionPipeline,
+    _format_timecode,
+    _split_text_by_sparse_anchors,
+)
 
 # ---------------------------------------------------------------------------
 # _format_timecode
@@ -70,6 +74,7 @@ def _make_stub_pipeline(timecode_mode: bool, video_duration=None):
         lm_output_mode='both',
         save_transcript=None,
         translation_output='russian-only',
+        timecode_min_interval_seconds=30.0,
     )
     p.args = args
     # Collect outputs instead of printing
@@ -122,3 +127,46 @@ class TestOutputTranscriptionTimecodePrefix:
         joined = ''.join(p._emitted)
         # Both lines should carry the prefix
         assert joined.count('[01:05]') >= 2
+
+
+class TestFullModeTimecodedSpans:
+    def test_split_text_by_sparse_anchors(self):
+        text = "A first sentence. A second sentence. A third sentence."
+        anchors = [
+            {"offset": 0, "time": 0.0},
+            {"offset": 18, "time": 10.0},
+            {"offset": 37, "time": 35.0},
+        ]
+
+        spans = _split_text_by_sparse_anchors(text, anchors, 30.0)
+
+        assert spans == [
+            (0.0, "A first sentence. A second sentence."),
+            (35.0, "A third sentence."),
+        ]
+
+    def test_full_output_emits_multiple_timecodes_from_translated_anchors(self):
+        p = _make_stub_pipeline(timecode_mode=True)
+        translated = "Первый кусок. Второй кусок. Третий кусок."
+        anchors_translated = [
+            {"offset": 0, "time": 0.0},
+            {"offset": 14, "time": 35.0},
+            {"offset": 28, "time": 70.0},
+        ]
+
+        handled = p._output_full_transcription_with_timecodes(
+            "ts",
+            "First part. Second part. Third part.",
+            translated,
+            "en",
+            0.99,
+            [{"offset": 0, "time": 0.0}],
+            anchors_translated,
+        )
+
+        joined = "".join(p._emitted)
+        assert handled is True
+        assert "[00:00]" in joined
+        assert "[00:35]" in joined
+        assert "[01:10]" in joined
+        assert joined.count("[00:00]") == 1

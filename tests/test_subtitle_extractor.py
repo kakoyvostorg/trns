@@ -8,7 +8,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from trns.transcription.subtitle_extractor import YouTubeSubtitleExtractor
+from trns.transcription.subtitle_extractor import YouTubeSubtitleExtractor, YtDlpSubtitleExtractor
 
 # ---------------------------------------------------------------------------
 # extract_video_id (instance method — same logic as the pipeline helper)
@@ -64,22 +64,31 @@ FAKE_TRANSCRIPT = [
 ]
 
 
+class FakeFetchedTranscript:
+    def __init__(self, rows):
+        self._rows = rows
+
+    def to_raw_data(self):
+        return list(self._rows)
+
+
 class TestGetNewSubtitles:
     def _make_extractor(self, video_id="test_video"):
         return YouTubeSubtitleExtractor(video_id)
 
     def _patch_transcript_api(self, transcript=None, side_effect=None):
-        """Return a context manager that patches YouTubeTranscriptApi.get_transcript.
+        """Patch YouTubeTranscriptApi() using the 1.x instance API.
 
         The class is imported inside the method body, so we patch it at its
         source module rather than the subtitle_extractor namespace.
         """
-        mock_api = MagicMock()
+        mock_instance = MagicMock()
         if side_effect:
-            mock_api.get_transcript.side_effect = side_effect
+            mock_instance.fetch.side_effect = side_effect
         else:
-            mock_api.get_transcript.return_value = transcript or FAKE_TRANSCRIPT
+            mock_instance.fetch.return_value = FakeFetchedTranscript(transcript or FAKE_TRANSCRIPT)
 
+        mock_api = MagicMock(return_value=mock_instance)
         return patch(
             "youtube_transcript_api.YouTubeTranscriptApi",
             mock_api,
@@ -122,10 +131,10 @@ class TestGetNewSubtitles:
         from youtube_transcript_api._errors import NoTranscriptFound
 
         extractor = self._make_extractor()
-        # Patch both get_transcript and list_transcripts to raise
-        mock_api = MagicMock()
-        mock_api.get_transcript.side_effect = NoTranscriptFound("vid", ["en"], {})
-        mock_api.list_transcripts.side_effect = NoTranscriptFound("vid", ["en"], {})
+        mock_instance = MagicMock()
+        mock_instance.fetch.side_effect = NoTranscriptFound("vid", ["en"], {})
+        mock_instance.list.side_effect = NoTranscriptFound("vid", ["en"], {})
+        mock_api = MagicMock(return_value=mock_instance)
 
         with patch("youtube_transcript_api.YouTubeTranscriptApi", mock_api):
             result = extractor.get_new_subtitles(language="en")
@@ -163,8 +172,9 @@ class TestCheckSubtitlesAvailable:
         mock_list = MagicMock()
         mock_list.__iter__ = MagicMock(return_value=iter([mock_transcript]))
 
-        mock_api = MagicMock()
-        mock_api.list_transcripts.return_value = mock_list
+        mock_instance = MagicMock()
+        mock_instance.list.return_value = mock_list
+        mock_api = MagicMock(return_value=mock_instance)
 
         with patch("youtube_transcript_api.YouTubeTranscriptApi", mock_api):
             available, langs = extractor.check_subtitles_available()
@@ -176,11 +186,51 @@ class TestCheckSubtitlesAvailable:
         from youtube_transcript_api._errors import TranscriptsDisabled
 
         extractor = YouTubeSubtitleExtractor("test_id")
-        mock_api = MagicMock()
-        mock_api.list_transcripts.side_effect = TranscriptsDisabled("test_id")
+        mock_instance = MagicMock()
+        mock_instance.list.side_effect = TranscriptsDisabled("test_id")
+        mock_api = MagicMock(return_value=mock_instance)
 
         with patch("youtube_transcript_api.YouTubeTranscriptApi", mock_api):
             available, langs = extractor.check_subtitles_available()
 
         assert available is False
         assert langs == []
+
+
+class TestYtDlpSubtitleExtractor:
+    def test_no_subtitles_exposed_returns_false(self):
+        extractor = YtDlpSubtitleExtractor("https://x.com/u/status/1")
+        extractor._info = {"subtitles": {}, "automatic_captions": None}
+
+        available, langs = extractor.check_subtitles_available()
+
+        assert available is False
+        assert langs == []
+
+    def test_parses_vtt_segments(self):
+        data = """WEBVTT
+
+00:00:00.000 --> 00:00:02.000
+Hello
+
+00:00:35.000 --> 00:00:37.500
+World
+"""
+        segments = YtDlpSubtitleExtractor._parse_subtitle_text(data)
+
+        assert segments == [
+            {"text": "Hello", "start": 0.0, "duration": 2.0},
+            {"text": "World", "start": 35.0, "duration": 2.5},
+        ]
+
+    def test_cookie_file_is_passed_to_yt_dlp_options(self):
+        extractor = YtDlpSubtitleExtractor(
+            "https://x.com/u/status/1",
+            yt_dlp_cookie_file="/tmp/cookies.txt",
+            yt_dlp_cookies_from_browser="firefox",
+        )
+
+        opts = extractor._opts(format="bestaudio/best")
+
+        assert opts["cookiefile"] == "/tmp/cookies.txt"
+        assert "cookiesfrombrowser" not in opts

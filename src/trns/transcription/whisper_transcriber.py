@@ -13,6 +13,8 @@ import subprocess
 import time
 from typing import Optional, Tuple
 
+from .yt_dlp_utils import build_yt_dlp_opts, run_with_retries
+
 logger = logging.getLogger(__name__)
 
 
@@ -64,7 +66,16 @@ class WhisperTranscriber:
     Extracts audio from YouTube video and processes it in chunks.
     """
 
-    def __init__(self, model_size: str = "auto", use_faster_whisper: bool = True, shutdown_flag=None):
+    def __init__(
+        self,
+        model_size: str = "auto",
+        use_faster_whisper: bool = True,
+        shutdown_flag=None,
+        yt_dlp_cookie_file: Optional[str] = None,
+        yt_dlp_cookies_from_browser: Optional[str] = None,
+        yt_dlp_retries: int = 3,
+        yt_dlp_socket_timeout: int = 20,
+    ):
         """
         Initialize Whisper transcriber.
 
@@ -82,6 +93,10 @@ class WhisperTranscriber:
         self.small_model = None  # Small model for non-English transcription
         self.explicit_model = None  # User-specified model (when not "auto")
         self.shutdown_flag = shutdown_flag
+        self.yt_dlp_cookie_file = yt_dlp_cookie_file
+        self.yt_dlp_cookies_from_browser = yt_dlp_cookies_from_browser
+        self.yt_dlp_retries = max(1, int(yt_dlp_retries or 3))
+        self.yt_dlp_socket_timeout = max(1, int(yt_dlp_socket_timeout or 20))
         # Cache for video info to avoid redundant fetching
         self._video_info_cache = {}  # {video_id: {'info': dict, 'timestamp': float, 'is_live': bool}}
         self._cache_ttl = 300  # Cache for 5 minutes (300 seconds)
@@ -89,6 +104,23 @@ class WhisperTranscriber:
         self._translator_cache = {}  # {source_language: GoogleTranslator instance}
         self._last_detected_language = None  # Cache last detected language
         self._initialize_model()
+
+    def _build_yt_dlp_opts(self, **overrides) -> dict:
+        return build_yt_dlp_opts(
+            yt_dlp_cookie_file=self.yt_dlp_cookie_file,
+            yt_dlp_cookies_from_browser=self.yt_dlp_cookies_from_browser,
+            retries=self.yt_dlp_retries,
+            socket_timeout=self.yt_dlp_socket_timeout,
+            **overrides,
+        )
+
+    def _run_yt_dlp_with_retries(self, label: str, action):
+        return run_with_retries(
+            label,
+            action,
+            attempts=self.yt_dlp_retries,
+            shutdown_check=self._check_shutdown,
+        )
 
     def _check_shutdown(self) -> bool:
         """Check if shutdown was requested"""
@@ -330,37 +362,28 @@ class WhisperTranscriber:
 
         # Fetch fresh info
         logger.info(f"Fetching video info for: {video_id}")
-        ydl_opts_info = {
-            'format': 'bestaudio/best',
-            'quiet': True,
-            'no_warnings': True,
-            # Add headers to avoid 403 errors
-            'http_headers': {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-                'Accept-Language': 'en-us,en;q=0.5',
-                'Accept-Encoding': 'gzip, deflate',
-                'Connection': 'keep-alive',
-            },
-        }
+        ydl_opts_info = self._build_yt_dlp_opts(format='bestaudio/best')
 
         try:
-            with yt_dlp.YoutubeDL(ydl_opts_info) as ydl:
-                logger.info("Extracting video info...")
-                info = ydl.extract_info(url, download=False)
+            def fetch_info():
+                with yt_dlp.YoutubeDL(ydl_opts_info) as ydl:
+                    logger.info("Extracting video info...")
+                    return ydl.extract_info(url, download=False)
 
-                if info:
-                    # Cache the info
-                    self._video_info_cache[video_id] = {
-                        'info': info,
-                        'timestamp': current_time,
-                        'is_live': info.get('is_live', False)
-                    }
-                    logger.info(f"Video info cached. Is live: {info.get('is_live', False)}")
-                    return info
-                else:
-                    logger.error("Failed to get video info")
-                    return None
+            info = self._run_yt_dlp_with_retries("yt-dlp metadata", fetch_info)
+
+            if info:
+                # Cache the info
+                self._video_info_cache[video_id] = {
+                    'info': info,
+                    'timestamp': current_time,
+                    'is_live': info.get('is_live', False)
+                }
+                logger.info(f"Video info cached. Is live: {info.get('is_live', False)}")
+                return info
+            else:
+                logger.error("Failed to get video info")
+                return None
 
         except Exception as e:
             logger.error(f"Error getting video info: {e}")
@@ -434,30 +457,21 @@ class WhisperTranscriber:
             # Note: When using external_downloader, yt-dlp might save the file with a different name
             # We'll search for the file after download
             base_audio_path = audio_path.replace('.wav', '')
-            ydl_opts_chunk = {
-                'format': 'bestaudio/best',
-                'outtmpl': base_audio_path + '.%(ext)s',  # Let yt-dlp choose the extension
-                'external_downloader': 'ffmpeg',
-                'external_downloader_args': [
-                    '-ss', str(start_time),  # Start time
-                    '-t', str(duration),     # Duration
+            ydl_opts_chunk = self._build_yt_dlp_opts(
+                format='bestaudio/best',
+                outtmpl=base_audio_path + '.%(ext)s',
+                external_downloader='ffmpeg',
+                external_downloader_args=[
+                    '-ss', str(start_time),
+                    '-t', str(duration),
                     '-loglevel', 'error'
                 ],
-                'postprocessors': [{
+                postprocessors=[{
                     'key': 'FFmpegExtractAudio',
                     'preferredcodec': 'wav',
                     'preferredquality': '192',
                 }],
-                'quiet': True,
-                'no_warnings': True,
-                'http_headers': {
-                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-                    'Accept-Language': 'en-us,en;q=0.5',
-                    'Accept-Encoding': 'gzip, deflate',
-                    'Connection': 'keep-alive',
-                },
-            }
+            )
 
             try:
                 # Check shutdown flag before download
@@ -469,102 +483,103 @@ class WhisperTranscriber:
                 logger.info(f"Downloading audio chunk from {start_time}s for {duration}s (video_id: {video_id})")
                 logger.debug(f"Base audio path: {base_audio_path}")
 
-                # Download the audio chunk
-                with yt_dlp.YoutubeDL(ydl_opts_chunk) as ydl:
-                    try:
-                        # Download directly - extract_info might interfere with external_downloader
+                def download_chunk():
+                    with yt_dlp.YoutubeDL(ydl_opts_chunk) as ydl:
                         ydl.download([url])
-                        logger.debug("yt-dlp download completed successfully")
-                    except Exception as download_error:
-                        logger.error(f"yt-dlp download failed: {download_error}", exc_info=True)
-                        # Check if it's a known error that we can retry
-                        error_str = str(download_error).lower()
-                        if 'http' in error_str or 'network' in error_str or 'timeout' in error_str:
-                            logger.warning("Network-related error, might be temporary")
-                        return None
+                    return True
 
-                    # Check shutdown flag after download
+                try:
+                    self._run_yt_dlp_with_retries(
+                        f"yt-dlp chunk download at {start_time:.1f}s",
+                        download_chunk,
+                    )
+                    logger.debug("yt-dlp download completed successfully")
+                except Exception as download_error:
+                    logger.error(f"yt-dlp download failed: {download_error}", exc_info=True)
+                    return None
+
+                # Check shutdown flag after download
+                if self._check_shutdown():
+                    logger.debug("Shutdown requested after audio download")
+                    self._cleanup_temp_files(base_audio_path)
+                    return None
+
+                # Find the actual audio file with retry logic
+                # yt-dlp might have saved it with a different name, so we search broadly
+                max_retries = 5
+                retry_delay = 0.2
+
+                logger.debug(f"Searching for audio file with base path: {base_audio_path}")
+                found_files = []
+                for retry in range(max_retries):
+                    # Check shutdown flag
                     if self._check_shutdown():
-                        logger.debug("Shutdown requested after audio download")
+                        logger.debug("Shutdown requested during audio file search")
                         self._cleanup_temp_files(base_audio_path)
                         return None
 
-                    # Find the actual audio file with retry logic
-                    # yt-dlp might have saved it with a different name, so we search broadly
-                    max_retries = 5
-                    retry_delay = 0.2
+                    # List all files in temp directory that match our pattern
+                    temp_dir = os.path.dirname(base_audio_path)
+                    base_name = os.path.basename(base_audio_path)
+                    if os.path.exists(temp_dir):
+                        all_files = os.listdir(temp_dir)
+                        # Look for files that start with our base name
+                        matching_files = [f for f in all_files if f.startswith(base_name)]
+                        if matching_files:
+                            logger.debug(f"Found potential audio files matching base name: {matching_files}")
 
-                    logger.debug(f"Searching for audio file with base path: {base_audio_path}")
-                    found_files = []
-                    for retry in range(max_retries):
-                        # Check shutdown flag
-                        if self._check_shutdown():
-                            logger.debug("Shutdown requested during audio file search")
-                            self._cleanup_temp_files(base_audio_path)
-                            return None
+                    # Try the expected extensions first
+                    for ext in ['.wav', '.m4a', '.webm', '.opus', '.mp3']:
+                        candidate = base_audio_path + ext
+                        if os.path.exists(candidate):
+                            file_size = os.path.getsize(candidate)
+                            logger.debug(f"Found candidate file: {candidate} (size: {file_size} bytes)")
+                            found_files.append((candidate, file_size))
+                            # Wait a bit to ensure file is fully written
+                            time.sleep(0.1)
+                            # Verify file is not empty
+                            if file_size > 0:
+                                logger.info(f"Successfully found audio file: {candidate} ({file_size} bytes)")
+                                return candidate
+                            else:
+                                logger.warning(f"Found file but it's empty: {candidate}")
 
-                        # List all files in temp directory that match our pattern
-                        temp_dir = os.path.dirname(base_audio_path)
-                        base_name = os.path.basename(base_audio_path)
-                        if os.path.exists(temp_dir):
-                            all_files = os.listdir(temp_dir)
-                            # Look for files that start with our base name
-                            matching_files = [f for f in all_files if f.startswith(base_name)]
-                            if matching_files:
-                                logger.debug(f"Found potential audio files matching base name: {matching_files}")
+                    if retry < max_retries - 1:
+                        logger.debug(f"Audio file not found yet, retry {retry + 1}/{max_retries}")
+                        # Make sleep interruptible
+                        sleep_chunk = 0.1
+                        slept = 0
+                        while slept < retry_delay and not self._check_shutdown():
+                            remaining = min(sleep_chunk, retry_delay - slept)
+                            time.sleep(remaining)
+                            slept += remaining
+                        retry_delay *= 1.5  # Exponential backoff
 
-                        # Try the expected extensions first
-                        for ext in ['.wav', '.m4a', '.webm', '.opus', '.mp3']:
-                            candidate = base_audio_path + ext
-                            if os.path.exists(candidate):
-                                file_size = os.path.getsize(candidate)
-                                logger.debug(f"Found candidate file: {candidate} (size: {file_size} bytes)")
-                                found_files.append((candidate, file_size))
-                                # Wait a bit to ensure file is fully written
-                                time.sleep(0.1)
-                                # Verify file is not empty
-                                if file_size > 0:
-                                    logger.info(f"Successfully found audio file: {candidate} ({file_size} bytes)")
-                                    return candidate
-                                else:
-                                    logger.warning(f"Found file but it's empty: {candidate}")
+                # Log detailed information about what we found
+                if found_files:
+                    logger.warning(f"Audio file not found after download, but found these files: {found_files}")
+                else:
+                    logger.warning(f"Audio file not found after download and retries. Base path: {base_audio_path}")
+                    # List temp directory contents for debugging
+                    temp_dir = os.path.dirname(base_audio_path)
+                    if os.path.exists(temp_dir):
+                        recent_files = [f for f in os.listdir(temp_dir) if 'youtube_audio' in f]
+                        if recent_files:
+                            logger.debug(f"Recent youtube_audio files in temp dir: {recent_files[-10:]}")
 
-                        if retry < max_retries - 1:
-                            logger.debug(f"Audio file not found yet, retry {retry + 1}/{max_retries}")
-                            # Make sleep interruptible
-                            sleep_chunk = 0.1
-                            slept = 0
-                            while slept < retry_delay and not self._check_shutdown():
-                                remaining = min(sleep_chunk, retry_delay - slept)
-                                time.sleep(remaining)
-                                slept += remaining
-                            retry_delay *= 1.5  # Exponential backoff
-
-                    # Log detailed information about what we found
-                    if found_files:
-                        logger.warning(f"Audio file not found after download, but found these files: {found_files}")
-                    else:
-                        logger.warning(f"Audio file not found after download and retries. Base path: {base_audio_path}")
-                        # List temp directory contents for debugging
-                        temp_dir = os.path.dirname(base_audio_path)
-                        if os.path.exists(temp_dir):
-                            recent_files = [f for f in os.listdir(temp_dir) if 'youtube_audio' in f]
-                            if recent_files:
-                                logger.debug(f"Recent youtube_audio files in temp dir: {recent_files[-10:]}")
-
-                            # Also check for files modified in the last minute (might be our download)
-                            import time as time_module
-                            current_time = time_module.time()
-                            very_recent_files = []
-                            for f in os.listdir(temp_dir):
-                                fpath = os.path.join(temp_dir, f)
-                                if os.path.isfile(fpath):
-                                    mtime = os.path.getmtime(fpath)
-                                    if current_time - mtime < 60:  # Modified in last minute
-                                        very_recent_files.append((f, current_time - mtime))
-                            if very_recent_files:
-                                logger.debug(f"Very recently modified files in temp dir: {very_recent_files}")
-                    return None
+                        # Also check for files modified in the last minute (might be our download)
+                        import time as time_module
+                        current_time = time_module.time()
+                        very_recent_files = []
+                        for f in os.listdir(temp_dir):
+                            fpath = os.path.join(temp_dir, f)
+                            if os.path.isfile(fpath):
+                                mtime = os.path.getmtime(fpath)
+                                if current_time - mtime < 60:  # Modified in last minute
+                                    very_recent_files.append((f, current_time - mtime))
+                        if very_recent_files:
+                            logger.debug(f"Very recently modified files in temp dir: {very_recent_files}")
+                return None
             except Exception as e:
                 logger.error(f"Error downloading audio chunk from {start_time}s: {e}", exc_info=True)
                 import traceback
@@ -659,27 +674,17 @@ class WhisperTranscriber:
                 download_duration = duration + overlap
                 logger.info(f"Live stream detected, extracting {duration}s audio chunk (with {overlap}s overlap = {download_duration}s total)...")
                 # Use yt-dlp with external downloader (ffmpeg) to limit duration
-                ydl_opts_live = {
-                    'format': 'bestaudio/best',
-                    'outtmpl': audio_path.replace('.wav', '.%(ext)s'),
-                    'external_downloader': 'ffmpeg',
-                    'external_downloader_args': ['-t', str(download_duration), '-loglevel', 'error'],  # Download duration + overlap
-                    'postprocessors': [{
+                ydl_opts_live = self._build_yt_dlp_opts(
+                    format='bestaudio/best',
+                    outtmpl=audio_path.replace('.wav', '.%(ext)s'),
+                    external_downloader='ffmpeg',
+                    external_downloader_args=['-t', str(download_duration), '-loglevel', 'error'],
+                    postprocessors=[{
                         'key': 'FFmpegExtractAudio',
                         'preferredcodec': 'wav',
                         'preferredquality': '192',
                     }],
-                    'quiet': True,  # Suppress yt-dlp output
-                    'no_warnings': True,
-                    # Add headers to avoid 403 errors
-                    'http_headers': {
-                        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-                        'Accept-Language': 'en-us,en;q=0.5',
-                        'Accept-Encoding': 'gzip, deflate',
-                        'Connection': 'keep-alive',
-                    },
-                }
+                )
 
                 try:
                     # Calculate timeout: use max of (download_duration * 2) or 45 seconds
@@ -745,42 +750,36 @@ class WhisperTranscriber:
 
                 # Otherwise, download entire video (for full processing mode)
                 logger.info("Non-live video, downloading entire audio...")
-                ydl_opts_download = {
-                    'format': 'bestaudio/best',
-                    'outtmpl': audio_path.replace('.wav', '.%(ext)s'),
-                    'postprocessors': [{
+                ydl_opts_download = self._build_yt_dlp_opts(
+                    format='bestaudio/best',
+                    outtmpl=audio_path.replace('.wav', '.%(ext)s'),
+                    postprocessors=[{
                         'key': 'FFmpegExtractAudio',
                         'preferredcodec': 'wav',
                         'preferredquality': '192',
                     }],
-                    'quiet': True,
-                    'no_warnings': True,
-                    # Add headers to avoid 403 errors
-                    'http_headers': {
-                        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-                        'Accept-Language': 'en-us,en;q=0.5',
-                        'Accept-Encoding': 'gzip, deflate',
-                        'Connection': 'keep-alive',
-                    },
-                }
+                )
 
                 try:
-                    with yt_dlp.YoutubeDL(ydl_opts_download) as ydl:
-                        logger.info("Downloading audio...")
-                        ydl.download([url])
+                    def download_full():
+                        with yt_dlp.YoutubeDL(ydl_opts_download) as ydl:
+                            ydl.download([url])
+                        return True
 
-                        # Find the actual audio file (yt-dlp may change extension)
-                        logger.info("Searching for downloaded audio file...")
-                        base_path = audio_path.replace('.wav', '')
-                        for ext in ['.wav', '.m4a', '.webm', '.opus', '.mp3']:
-                            candidate = base_path + ext
-                            if os.path.exists(candidate):
-                                logger.info(f"Found audio file: {candidate}")
-                                return candidate
+                    logger.info("Downloading audio...")
+                    self._run_yt_dlp_with_retries("yt-dlp full download", download_full)
 
-                        logger.warning("Audio file not found after download")
-                        return None
+                    # Find the actual audio file (yt-dlp may change extension)
+                    logger.info("Searching for downloaded audio file...")
+                    base_path = audio_path.replace('.wav', '')
+                    for ext in ['.wav', '.m4a', '.webm', '.opus', '.mp3']:
+                        candidate = base_path + ext
+                        if os.path.exists(candidate):
+                            logger.info(f"Found audio file: {candidate}")
+                            return candidate
+
+                    logger.warning("Audio file not found after download")
+                    return None
                 except Exception as e:
                     logger.error(f"Error downloading audio: {e}")
                     return None
