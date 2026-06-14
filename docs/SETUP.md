@@ -77,6 +77,8 @@ export BOT_TOKEN=your_bot_token_here
 export TELEGRAM_API_ID=your_api_id_here
 export TELEGRAM_API_HASH=your_api_hash_here
 export AUTH_KEY=your_auth_key_here
+export DEMO_AUTH_KEY=SmirnovCVdemo        # optional limited CV/recruiter access
+export DEMO_VIDEO_LIMIT=10                # optional; defaults to 10 videos per Telegram user
 export OPENROUTER_API_KEY=your_openrouter_api_key
 # For public production deployments:
 # export TRNS_ENV=production
@@ -93,6 +95,8 @@ export OPENROUTER_API_KEY=your_openrouter_api_key
 
 **User Authentication:**
 Users authenticate by sending the `AUTH_KEY` to the bot. After successful authentication, their user state is stored under `TRNS_STATE_DIR` (`state/users/<telegram_id>.json` by default) and they remain authenticated.
+
+For limited recruiter/CV access, set `DEMO_AUTH_KEY=SmirnovCVdemo`. Users who authenticate with that key get the same bot features but can submit only `DEMO_VIDEO_LIMIT` videos, tracked per Telegram user under `TRNS_STATE_DIR`.
 
 #### Method B: File-based Configuration
 

@@ -13,26 +13,32 @@ import pytest
 
 from trns.bot.utils import (
     DAILY_CAPACITY,
+    DEFAULT_DEMO_VIDEO_LIMIT,
     WARNING_THRESHOLD,
     add_authenticated_user,
+    add_demo_authenticated_user,
     add_tokens,
     check_capacity_at_start,
     check_token_warning,
     decrement_daily_capacity,
     get_current_token,
     get_daily_capacity,
+    get_demo_video_limit,
     get_text,
     get_timecode_default,
     get_token_count,
+    get_user_auth_mode,
     get_user_setting,
     initialize_user_settings,
     is_user_authenticated,
     load_auth_key,
+    load_demo_auth_key,
     load_tokens,
     load_user_settings,
     save_tokens,
     save_user_settings,
     set_user_setting,
+    try_consume_demo_video,
 )
 
 # ---------------------------------------------------------------------------
@@ -79,6 +85,24 @@ class TestLoadAuthKey:
         with patch.dict("os.environ", {}, clear=True):
             with pytest.raises(FileNotFoundError):
                 load_auth_key(str(tmp_path / "missing.txt"))
+
+
+class TestLoadDemoAuthKey:
+    def test_returns_env_value(self):
+        with patch.dict("os.environ", {"DEMO_AUTH_KEY": "demo-key"}):
+            assert load_demo_auth_key() == "demo-key"
+
+    def test_returns_none_when_unset(self):
+        with patch.dict("os.environ", {}, clear=True):
+            assert load_demo_auth_key() is None
+
+    def test_demo_limit_defaults_to_10(self):
+        with patch.dict("os.environ", {}, clear=True):
+            assert get_demo_video_limit() == DEFAULT_DEMO_VIDEO_LIMIT
+
+    def test_demo_limit_uses_env_override(self):
+        with patch.dict("os.environ", {"DEMO_VIDEO_LIMIT": "3"}):
+            assert get_demo_video_limit() == 3
 
 
 # ---------------------------------------------------------------------------
@@ -130,7 +154,53 @@ class TestAddAuthenticatedUser:
         user_file = tmp_path / "state" / "users" / "333.json"
         data = json.loads(user_file.read_text(encoding="utf-8"))
         assert data["authenticated"] is True
+        assert data["auth_mode"] == "full"
         assert data["settings"] == {}
+
+    def test_demo_auth_writes_limit_state(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("TRNS_STATE_DIR", str(tmp_path / "state"))
+        add_demo_authenticated_user(555)
+
+        user_file = tmp_path / "state" / "users" / "555.json"
+        data = json.loads(user_file.read_text(encoding="utf-8"))
+        assert data["authenticated"] is True
+        assert data["auth_mode"] == "demo"
+        assert data["demo"] == {"video_limit": 10, "videos_used": 0}
+        assert get_user_auth_mode(555) == "demo"
+
+    def test_demo_auth_uses_limit_env_override(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("TRNS_STATE_DIR", str(tmp_path / "state"))
+        monkeypatch.setenv("DEMO_VIDEO_LIMIT", "2")
+        add_demo_authenticated_user(556)
+
+        user_file = tmp_path / "state" / "users" / "556.json"
+        data = json.loads(user_file.read_text(encoding="utf-8"))
+        assert data["demo"]["video_limit"] == 2
+
+    def test_full_user_is_not_downgraded_to_demo(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("TRNS_STATE_DIR", str(tmp_path / "state"))
+        add_authenticated_user(557)
+        add_demo_authenticated_user(557)
+
+        user_file = tmp_path / "state" / "users" / "557.json"
+        data = json.loads(user_file.read_text(encoding="utf-8"))
+        assert data["auth_mode"] == "full"
+        assert "demo" not in data
+
+    def test_demo_quota_rejects_eleventh_video(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("TRNS_STATE_DIR", str(tmp_path / "state"))
+        add_demo_authenticated_user(558, video_limit=10)
+
+        for remaining in range(9, -1, -1):
+            allowed, actual_remaining, limit = try_consume_demo_video(558)
+            assert allowed is True
+            assert actual_remaining == remaining
+            assert limit == 10
+
+        allowed, remaining, limit = try_consume_demo_video(558)
+        assert allowed is False
+        assert remaining == 0
+        assert limit == 10
 
 
 # ---------------------------------------------------------------------------

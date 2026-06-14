@@ -32,6 +32,9 @@ _settings_lock = threading.Lock()
 # Daily capacity constants
 DAILY_CAPACITY = 1000
 WARNING_THRESHOLD = 50
+DEFAULT_DEMO_VIDEO_LIMIT = 10
+AUTH_MODE_FULL = "full"
+AUTH_MODE_DEMO = "demo"
 
 _DEFAULT_USER_SETTINGS_PATH = "user_settings.json"
 _DEFAULT_CAPACITY_STATE_NAME = "global.json"
@@ -180,6 +183,30 @@ def load_auth_key(key_path: str = "key.txt") -> str:
         raise
 
 
+def load_demo_auth_key() -> Optional[str]:
+    """Load optional demo authentication key from the environment only."""
+    demo_key = os.getenv("DEMO_AUTH_KEY")
+    if not demo_key:
+        return None
+    return demo_key.strip() or None
+
+
+def get_demo_video_limit() -> int:
+    """Return configured per-user demo video limit."""
+    raw_limit = os.getenv("DEMO_VIDEO_LIMIT")
+    if not raw_limit:
+        return DEFAULT_DEMO_VIDEO_LIMIT
+    try:
+        limit = int(raw_limit)
+    except ValueError:
+        logger.warning("Invalid DEMO_VIDEO_LIMIT=%r; using %s", raw_limit, DEFAULT_DEMO_VIDEO_LIMIT)
+        return DEFAULT_DEMO_VIDEO_LIMIT
+    if limit < 0:
+        logger.warning("Negative DEMO_VIDEO_LIMIT=%r; using %s", raw_limit, DEFAULT_DEMO_VIDEO_LIMIT)
+        return DEFAULT_DEMO_VIDEO_LIMIT
+    return limit
+
+
 def _load_user_state(user_id: int) -> Dict:
     """Load per-user runtime state from state/users/<telegram_id>.json."""
     try:
@@ -216,6 +243,14 @@ def is_user_authenticated(user_id: int, config_path: str = None) -> bool:
     except Exception as e:
         logger.error(f"Error checking authentication: {e}")
         return False
+
+
+def get_user_auth_mode(user_id: int) -> Optional[str]:
+    """Return the user's persisted auth mode, defaulting old state to full."""
+    state = _load_user_state(user_id)
+    if state.get("authenticated") is not True:
+        return None
+    return state.get("auth_mode") or AUTH_MODE_FULL
 
 
 def _add_authenticated_user_to_config(user_id: int, config_path: str):
@@ -291,13 +326,74 @@ def add_authenticated_user(user_id: int, config_path: str = None):
 
     with _settings_lock:
         state = _load_user_state(user_id)
-        if state.get("authenticated") is True:
+        if state.get("authenticated") is True and state.get("auth_mode") == AUTH_MODE_FULL:
             logger.info(f"User {user_id} is already authenticated")
             return
         state["authenticated"] = True
+        state["auth_mode"] = AUTH_MODE_FULL
+        state.pop("demo", None)
         state.setdefault("settings", {})
         _save_user_state(user_id, state)
         logger.info(f"Added user {user_id} to per-user state")
+
+
+def add_demo_authenticated_user(user_id: int, video_limit: int = None):
+    """Authenticate a user in demo mode without downgrading full users."""
+    if video_limit is None:
+        video_limit = get_demo_video_limit()
+
+    with _settings_lock:
+        state = _load_user_state(user_id)
+        if state.get("authenticated") is True and state.get("auth_mode") == AUTH_MODE_FULL:
+            logger.info("User %s already has full authentication; not downgrading to demo", user_id)
+            return
+
+        demo_state = state.get("demo", {})
+        if not isinstance(demo_state, dict):
+            demo_state = {}
+
+        state["authenticated"] = True
+        state["auth_mode"] = AUTH_MODE_DEMO
+        state["demo"] = {
+            "video_limit": int(video_limit),
+            "videos_used": int(demo_state.get("videos_used", 0) or 0),
+        }
+        state.setdefault("settings", {})
+        _save_user_state(user_id, state)
+        logger.info("Added user %s to demo auth state with limit %s", user_id, video_limit)
+
+
+def try_consume_demo_video(user_id: int) -> Tuple[bool, int, int]:
+    """
+    Consume one demo video allowance if the user is in demo mode.
+
+    Returns (allowed, remaining, limit). Full or legacy users are always allowed.
+    """
+    with _settings_lock:
+        state = _load_user_state(user_id)
+        if state.get("authenticated") is not True:
+            return (True, -1, -1)
+
+        auth_mode = state.get("auth_mode") or AUTH_MODE_FULL
+        if auth_mode != AUTH_MODE_DEMO:
+            return (True, -1, -1)
+
+        demo_state = state.get("demo", {})
+        if not isinstance(demo_state, dict):
+            demo_state = {}
+
+        limit = int(demo_state.get("video_limit", get_demo_video_limit()) or 0)
+        used = int(demo_state.get("videos_used", 0) or 0)
+        if used >= limit:
+            return (False, 0, limit)
+
+        used += 1
+        demo_state["video_limit"] = limit
+        demo_state["videos_used"] = used
+        state["demo"] = demo_state
+        _save_user_state(user_id, state)
+
+        return (True, max(limit - used, 0), limit)
 
 
 def load_config(config_path: str = None) -> Dict:

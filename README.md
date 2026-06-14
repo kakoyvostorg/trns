@@ -43,6 +43,9 @@ export BOT_TOKEN=...            # from @BotFather
 export TELEGRAM_API_ID=...      # from my.telegram.org
 export TELEGRAM_API_HASH=...    # from my.telegram.org
 export AUTH_KEY=secret123       # users authenticate with this once
+# Optional CV/demo access:
+# export DEMO_AUTH_KEY=SmirnovCVdemo
+# export DEMO_VIDEO_LIMIT=10
 # For internet-facing production also set:
 # export TRNS_ENV=production
 # export WEBHOOK_SECRET=...
@@ -127,6 +130,8 @@ These are primarily for the Telegram bot server, not the CLI:
 | `TELEGRAM_API_ID` | Pyrogram MTProto API ID (from my.telegram.org) | — |
 | `TELEGRAM_API_HASH` | Pyrogram MTProto API hash | — |
 | `AUTH_KEY` | One-time auth key for new bot users | `key.txt` |
+| `DEMO_AUTH_KEY` | Optional demo auth key for limited CV/recruiter access | — |
+| `DEMO_VIDEO_LIMIT` | Videos allowed per Telegram user in demo mode | `10` |
 | `OPENROUTER_API_KEY` | OpenRouter API key (alternative to `api_key.txt`) | `api_key.txt` |
 | `HOST` | Server bind address | `0.0.0.0` |
 | `PORT` | Server port | `8000` |

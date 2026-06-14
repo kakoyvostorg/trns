@@ -11,16 +11,20 @@ from pyrogram.types import Message
 
 from trns.bot.utils import (
     add_authenticated_user,
+    add_demo_authenticated_user,
     check_capacity_at_start,
     check_token_warning,
+    get_demo_video_limit,
     get_text,
     get_timecode_default,
     get_user_setting,
     initialize_user_settings,
     is_user_authenticated,
     load_auth_key,
+    load_demo_auth_key,
     load_metadata,
     set_user_setting,
+    try_consume_demo_video,
     update_context,
 )
 
@@ -47,6 +51,23 @@ from ._state import (
 logger = logging.getLogger(__name__)
 
 
+def _format_metadata_text(text: str, **values) -> str:
+    """Format localized text when it has placeholders."""
+    try:
+        return text.format(**values)
+    except Exception:
+        return text
+
+
+async def _reply_demo_limit_reached(message: Message, metadata: dict, limit: int) -> None:
+    text = _format_metadata_text(
+        get_text(metadata, "demo_limit_reached"),
+        limit=limit,
+        remaining=0,
+    )
+    await message.reply_text(text)
+
+
 async def handle_text_message(client: Client, message: Message) -> None:
     """Handle text messages (authentication, YouTube links, button clicks, context, tokens)"""
     from trns.bot.server import bot_metadata, create_keyboard
@@ -63,8 +84,15 @@ async def handle_text_message(client: Client, message: Message) -> None:
         if state == STATE_WAITING_KEY:
             # Check authentication key
             try:
-                auth_key = load_auth_key()
-                if text.strip() == auth_key:
+                try:
+                    auth_key = load_auth_key()
+                except FileNotFoundError:
+                    auth_key = None
+
+                demo_auth_key = load_demo_auth_key()
+                stripped_text = text.strip()
+
+                if auth_key and stripped_text == auth_key:
                     add_authenticated_user(user_id)
                     set_user_state(user_id, None)
 
@@ -76,6 +104,26 @@ async def handle_text_message(client: Client, message: Message) -> None:
 
                     await message.reply_text(
                         get_text(metadata, "auth_success"),
+                        reply_markup=keyboard
+                    )
+                elif demo_auth_key and stripped_text == demo_auth_key:
+                    demo_limit = get_demo_video_limit()
+                    add_demo_authenticated_user(user_id, video_limit=demo_limit)
+                    set_user_state(user_id, None)
+
+                    # Initialize user settings
+                    initialize_user_settings(user_id)
+
+                    # Create personalized keyboard
+                    keyboard = create_keyboard(metadata, user_id)
+
+                    success_text = _format_metadata_text(
+                        get_text(metadata, "demo_auth_success"),
+                        limit=demo_limit,
+                        remaining=demo_limit,
+                    )
+                    await message.reply_text(
+                        success_text,
                         reply_markup=keyboard
                     )
                 else:
@@ -135,6 +183,8 @@ async def handle_text_message(client: Client, message: Message) -> None:
         # Check if already processing and create task info atomically
         shutdown_flag = threading.Event()
         job_id = uuid.uuid4().hex
+        quota_allowed = True
+        quota_limit = -1
         with processing_lock:
             if user_id in user_processing_tasks:
                 asyncio.create_task(
@@ -142,11 +192,17 @@ async def handle_text_message(client: Client, message: Message) -> None:
                 ).add_done_callback(lambda t: handle_task_error(t, user_id))
                 return
 
-            user_processing_tasks[user_id] = {
-                "shutdown_flag": shutdown_flag,
-                "type": "youtube",
-                "job_id": job_id,
-            }
+            quota_allowed, _quota_remaining, quota_limit = try_consume_demo_video(user_id)
+            if quota_allowed:
+                user_processing_tasks[user_id] = {
+                    "shutdown_flag": shutdown_flag,
+                    "type": "youtube",
+                    "job_id": job_id,
+                }
+
+        if not quota_allowed:
+            await _reply_demo_limit_reached(message, metadata, quota_limit)
+            return
 
         set_user_state(user_id, STATE_PROCESSING)
 
@@ -190,6 +246,8 @@ async def handle_text_message(client: Client, message: Message) -> None:
     if is_tw:
         shutdown_flag = threading.Event()
         job_id = uuid.uuid4().hex
+        quota_allowed = True
+        quota_limit = -1
         with processing_lock:
             if user_id in user_processing_tasks:
                 asyncio.create_task(
@@ -197,11 +255,17 @@ async def handle_text_message(client: Client, message: Message) -> None:
                 ).add_done_callback(lambda t: handle_task_error(t, user_id))
                 return
 
-            user_processing_tasks[user_id] = {
-                "shutdown_flag": shutdown_flag,
-                "type": "twitter",
-                "job_id": job_id,
-            }
+            quota_allowed, _quota_remaining, quota_limit = try_consume_demo_video(user_id)
+            if quota_allowed:
+                user_processing_tasks[user_id] = {
+                    "shutdown_flag": shutdown_flag,
+                    "type": "twitter",
+                    "job_id": job_id,
+                }
+
+        if not quota_allowed:
+            await _reply_demo_limit_reached(message, metadata, quota_limit)
+            return
 
         set_user_state(user_id, STATE_PROCESSING)
 
@@ -282,24 +346,31 @@ async def handle_video_message(client: Client, message: Message) -> None:
         warning_text = get_text(metadata, "token_warning")
         await message.reply_text(warning_text)
 
-    # Set processing state
-    set_user_state(user_id, STATE_PROCESSING)
-
     shutdown_flag = threading.Event()
     job_id = uuid.uuid4().hex
+    quota_allowed = True
+    quota_limit = -1
     with processing_lock:
         if user_id in user_processing_tasks:
             asyncio.create_task(
                 message.reply_text(get_text(metadata, "processing_video"))
             ).add_done_callback(lambda t: handle_task_error(t, user_id))
-            set_user_state(user_id, None)
             return
 
-        user_processing_tasks[user_id] = {
-            "shutdown_flag": shutdown_flag,
-            "type": "file",
-            "job_id": job_id,
-        }
+        quota_allowed, _quota_remaining, quota_limit = try_consume_demo_video(user_id)
+        if quota_allowed:
+            user_processing_tasks[user_id] = {
+                "shutdown_flag": shutdown_flag,
+                "type": "file",
+                "job_id": job_id,
+            }
+
+    if not quota_allowed:
+        await _reply_demo_limit_reached(message, metadata, quota_limit)
+        return
+
+    # Set processing state
+    set_user_state(user_id, STATE_PROCESSING)
 
     await message.reply_text(get_text(metadata, "downloading_video"))
 
