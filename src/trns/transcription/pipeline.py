@@ -17,7 +17,11 @@ from typing import Callable, Optional
 
 from .language_model import LMProcessor
 from .subtitle_extractor import YouTubeSubtitleExtractor, YtDlpSubtitleExtractor
-from .whisper_transcriber import WhisperTranscriber, _is_local_file
+from .whisper_transcriber import (
+    WhisperTranscriber,
+    _is_local_file,
+    translate_segments_to_russian,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -450,6 +454,10 @@ class TranscriptionPipeline:
             self.process_mode = "chunked" if self.is_live_video else "full"
         else:
             self.process_mode = self.args.process_mode
+
+        if self.use_subtitles and not self.is_live_video and self.process_mode == "full":
+            self.process_mode = "chunked"
+            logger.info("Using chunked mode for non-live subtitle processing")
 
         logger.info(f"Processing mode: {self.process_mode}")
 
@@ -1262,7 +1270,7 @@ class TranscriptionPipeline:
 
                                 translated_text = text
                                 subtitle_anchors_translated = list(subtitle_anchors)
-                                if self.args.language != 'ru' and self.whisper_transcriber:
+                                if self.args.language != 'ru':
                                     try:
                                         subtitle_segments_for_translation = [
                                             {
@@ -1273,7 +1281,7 @@ class TranscriptionPipeline:
                                             for seg in segments
                                         ]
                                         translated_text, translated_segments = (
-                                            self.whisper_transcriber.translate_segments_to_russian(
+                                            translate_segments_to_russian(
                                                 subtitle_segments_for_translation,
                                                 self.args.language,
                                             )
@@ -1358,10 +1366,18 @@ class TranscriptionPipeline:
                                 if self.lm_processor and self.lm_queue:
                                     current_time = time.time()
                                     if current_time - self.last_lm_call_time >= self.lm_interval:
-                                        self.lm_queue.put((translated_text, timestamp, {
-                                            'iteration': self.iteration,
-                                            'language': self.args.language
-                                        }))
+                                        if not self.is_live_video and self.process_mode == "chunked":
+                                            report = self.lm_processor.process_transcription_window(
+                                                self.all_transcribed_text
+                                            )
+                                            if report:
+                                                report_timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                                                self._output_lm_report(report_timestamp, report)
+                                        else:
+                                            self.lm_queue.put((translated_text, timestamp, {
+                                                'iteration': self.iteration,
+                                                'language': self.args.language
+                                            }))
                                         self.last_lm_call_time = current_time
                                         if self.debug_mode:
                                             logger.debug(f"Added subtitle to LM queue (interval: {self.lm_interval}s)")

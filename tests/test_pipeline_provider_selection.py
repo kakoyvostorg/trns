@@ -47,6 +47,21 @@ class FakeTranscriber:
         }
 
 
+class FakeSubtitleExtractor:
+    def __init__(self, segments):
+        self.segments = segments
+        self.last_timestamp = 0.0
+        self.calls = 0
+
+    def check_subtitles_available(self):
+        return True, ["en (auto-generated)"]
+
+    def get_new_subtitles(self, language="en"):
+        self.calls += 1
+        self.last_timestamp = self.segments[-1]["start"] + self.segments[-1]["duration"]
+        return self.segments
+
+
 class TestPipelineProviderSelection:
     def setup_method(self):
         FakeTranscriber.instances = []
@@ -95,3 +110,39 @@ class TestPipelineProviderSelection:
         assert pipeline.use_whisper is True
         assert FakeTranscriber.instances[0].kwargs["yt_dlp_cookie_file"] == "/tmp/cookies.txt"
         assert FakeTranscriber.instances[0].kwargs["yt_dlp_cookies_from_browser"] == "firefox"
+
+    def test_shorts_subtitles_translate_without_whisper_transcriber(self):
+        segments = [
+            {"start": float(i * 2), "duration": 1.0, "text": f"english {i}."}
+            for i in range(55)
+        ]
+        fake_extractor = FakeSubtitleExtractor(segments)
+        emitted = []
+
+        def fake_translate(subtitle_segments, source_language):
+            assert source_language == "en"
+            translated = [
+                {**seg, "text": seg["text"].replace("english", "russian")}
+                for seg in subtitle_segments
+            ]
+            return " ".join(seg["text"] for seg in translated), translated
+
+        with patch(
+            "trns.transcription.pipeline.YouTubeSubtitleExtractor",
+            return_value=fake_extractor,
+        ):
+            with patch("trns.transcription.pipeline.WhisperTranscriber", FakeTranscriber):
+                with patch("trns.transcription.pipeline.translate_segments_to_russian", fake_translate):
+                    pipeline = TranscriptionPipeline(
+                        "https://www.youtube.com/shorts/dQw4w9WgXcQ",
+                        _args(timecode=False),
+                        lambda: False,
+                        output_callback=emitted.append,
+                    )
+                    pipeline.run()
+
+        joined = "".join(emitted)
+        assert FakeTranscriber.instances == []
+        assert "[en] english 0." in joined
+        assert "russian 0." in joined
+        assert pipeline.all_transcribed_text[0]["translated"].startswith("russian 0.")

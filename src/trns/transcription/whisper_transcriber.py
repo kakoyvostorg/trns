@@ -59,6 +59,113 @@ def _probe_local_media_info(path: str) -> dict:
     return info
 
 
+def translate_segments_to_russian(
+    segments: list,
+    source_language: str,
+    batch_size: int = 10,
+    translator_cache: Optional[dict] = None,
+) -> Tuple[str, list]:
+    """
+    Translate timed text segments to Russian while preserving per-segment alignment.
+
+    This helper intentionally does not depend on Whisper model state, so subtitle
+    paths can use the same translation logic as Whisper paths.
+    """
+    if not segments:
+        return '', []
+
+    if source_language == 'ru':
+        passthrough = [dict(s) for s in segments]
+        joined = " ".join(s.get('text', '') for s in passthrough).strip()
+        return joined, passthrough
+
+    cache = translator_cache if translator_cache is not None else {}
+
+    try:
+        from deep_translator import GoogleTranslator
+
+        if source_language not in cache:
+            logger.debug(f"Creating translator for {source_language} -> ru")
+            cache[source_language] = GoogleTranslator(source=source_language, target='ru')
+        translator = cache[source_language]
+
+        def _sanitize(t: str) -> str:
+            return (t or '').replace('|||', '| | |')
+
+        translated_segments: list = []
+
+        for start in range(0, len(segments), batch_size):
+            batch = segments[start:start + batch_size]
+            batch_texts = [_sanitize(s.get('text', '')) for s in batch]
+
+            if not any(t.strip() for t in batch_texts):
+                translated_segments.extend(dict(s) for s in batch)
+                continue
+
+            joined_input = "\n|||\n".join(batch_texts)
+
+            def _per_segment_fallback(batch_slice):
+                out = []
+                for orig in batch_slice:
+                    src = _sanitize(orig.get('text', ''))
+                    if not src.strip():
+                        out.append(dict(orig))
+                        continue
+                    try:
+                        single = translator.translate(src)
+                        if single:
+                            out.append({**orig, 'text': single.strip()})
+                        else:
+                            out.append(dict(orig))
+                    except Exception as inner_e:
+                        logger.warning(
+                            f"Per-segment translation failed (start={orig.get('start')}): {inner_e}"
+                        )
+                        out.append(dict(orig))
+                return out
+
+            try:
+                response = translator.translate(joined_input) or ""
+            except Exception as e:
+                logger.warning(f"Batch translate raised {e!r}; falling back per-segment")
+                translated_segments.extend(_per_segment_fallback(batch))
+                continue
+
+            pieces = [p.strip() for p in response.split('|||')]
+
+            if len(pieces) != len(batch):
+                logger.warning(
+                    f"Batch separator lost ({len(pieces)} pieces vs {len(batch)} "
+                    f"segments); falling back per-segment"
+                )
+                translated_segments.extend(_per_segment_fallback(batch))
+                continue
+
+            for orig, translated_piece in zip(batch, pieces):
+                if translated_piece:
+                    translated_segments.append({**orig, 'text': translated_piece})
+                else:
+                    translated_segments.append(dict(orig))
+
+        joined = " ".join(s.get('text', '') for s in translated_segments).strip()
+        logger.debug(
+            f"Segment translation complete: {len(segments)} segments -> "
+            f"{len(translated_segments)} translated ({len(joined)} chars)"
+        )
+        return joined, translated_segments
+
+    except ImportError:
+        logger.error("deep-translator not installed. Install with: pip install deep-translator")
+        passthrough = [dict(s) for s in segments]
+        joined = " ".join(s.get('text', '') for s in passthrough).strip()
+        return joined, passthrough
+    except Exception as e:
+        logger.warning(f"Segment translation setup failed: {e}; returning original text")
+        passthrough = [dict(s) for s in segments]
+        joined = " ".join(s.get('text', '') for s in passthrough).strip()
+        return joined, passthrough
+
+
 class WhisperTranscriber:
     """
     Transcribes audio using OpenAI Whisper (or faster-whisper for better performance).
@@ -1059,101 +1166,12 @@ class WhisperTranscriber:
         # Trivial no-op for already-Russian content.
         if source_language == 'ru':
             self._last_detected_language = 'ru'
-            # Return deep copies so callers can mutate without surprising us.
-            passthrough = [dict(s) for s in segments]
-            joined = " ".join(s.get('text', '') for s in passthrough).strip()
-            return joined, passthrough
-
-        try:
-            from deep_translator import GoogleTranslator
-
-            if source_language not in self._translator_cache:
-                logger.debug(f"Creating translator for {source_language} -> ru")
-                self._translator_cache[source_language] = GoogleTranslator(source=source_language, target='ru')
-            translator = self._translator_cache[source_language]
+        else:
             self._last_detected_language = source_language
 
-            # Defensive: neutralize any literal '|||' that might appear in source
-            # text so our batch separator stays unique. Practically unheard-of
-            # in natural speech, but free insurance.
-            def _sanitize(t: str) -> str:
-                return (t or '').replace('|||', '| | |')
-
-            translated_segments: list = []
-
-            # Split input into batches
-            for start in range(0, len(segments), batch_size):
-                batch = segments[start:start + batch_size]
-                batch_texts = [_sanitize(s.get('text', '')) for s in batch]
-
-                # If the whole batch is empty, just carry originals through
-                if not any(t.strip() for t in batch_texts):
-                    translated_segments.extend(dict(s) for s in batch)
-                    continue
-
-                joined_input = "\n|||\n".join(batch_texts)
-
-                def _per_segment_fallback(batch_slice):
-                    """Translate each segment individually; on failure keep original."""
-                    out = []
-                    for orig in batch_slice:
-                        src = _sanitize(orig.get('text', ''))
-                        if not src.strip():
-                            out.append(dict(orig))
-                            continue
-                        try:
-                            single = translator.translate(src)
-                            if single:
-                                out.append({**orig, 'text': single.strip()})
-                            else:
-                                out.append(dict(orig))
-                        except Exception as inner_e:
-                            logger.warning(
-                                f"Per-segment translation failed (start={orig.get('start')}): {inner_e}"
-                            )
-                            out.append(dict(orig))
-                    return out
-
-                try:
-                    response = translator.translate(joined_input) or ""
-                except Exception as e:
-                    logger.warning(f"Batch translate raised {e!r}; falling back per-segment")
-                    translated_segments.extend(_per_segment_fallback(batch))
-                    continue
-
-                # Split on '|||' (ignoring surrounding whitespace/newlines — Google
-                # may reformat them).
-                pieces = [p.strip() for p in response.split('|||')]
-
-                if len(pieces) != len(batch):
-                    logger.warning(
-                        f"Batch separator lost ({len(pieces)} pieces vs {len(batch)} "
-                        f"segments); falling back per-segment"
-                    )
-                    translated_segments.extend(_per_segment_fallback(batch))
-                    continue
-
-                for orig, translated_piece in zip(batch, pieces):
-                    if translated_piece:
-                        translated_segments.append({**orig, 'text': translated_piece})
-                    else:
-                        # Empty Russian for this slot — keep original text as fallback.
-                        translated_segments.append(dict(orig))
-
-            joined = " ".join(s.get('text', '') for s in translated_segments).strip()
-            logger.debug(
-                f"Segment translation complete: {len(segments)} segments -> "
-                f"{len(translated_segments)} translated ({len(joined)} chars)"
-            )
-            return joined, translated_segments
-
-        except ImportError:
-            logger.error("deep-translator not installed. Install with: pip install deep-translator")
-            passthrough = [dict(s) for s in segments]
-            joined = " ".join(s.get('text', '') for s in passthrough).strip()
-            return joined, passthrough
-        except Exception as e:
-            logger.warning(f"Segment translation setup failed: {e}; returning original text")
-            passthrough = [dict(s) for s in segments]
-            joined = " ".join(s.get('text', '') for s in passthrough).strip()
-            return joined, passthrough
+        return translate_segments_to_russian(
+            segments,
+            source_language,
+            batch_size=batch_size,
+            translator_cache=self._translator_cache,
+        )
